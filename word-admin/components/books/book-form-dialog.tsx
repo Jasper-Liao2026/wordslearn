@@ -16,23 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  BOOK_LEVELS,
-  BOOK_LEVEL_LABELS,
-  BOOK_STATUSES,
-  BOOK_STATUS_LABELS,
-  type Book,
-  type BookLevel,
-  type BookStatus,
-} from "@/lib/types";
+import type { Book } from "@/lib/types";
 
 export function BookFormDialog({
   open,
@@ -66,18 +50,18 @@ function BookFormContent({
   const [form, setForm] = useState(() =>
     book
       ? {
-          name: book.name,
-          description: book.description,
-          level: book.level,
+          title: book.title,
           wordCount: String(book.wordCount),
-          status: book.status,
+          coverUrl: book.coverUrl ?? "",
+          bookld: book.bookld,
+          tags: book.tags.join(", "),
         }
       : {
-          name: "",
-          description: "",
-          level: "CET4" as BookLevel,
+          title: "",
           wordCount: "",
-          status: "draft" as BookStatus,
+          coverUrl: "",
+          bookld: "",
+          tags: "",
         }
   );
   const [error, setError] = useState<string | null>(null);
@@ -89,14 +73,19 @@ function BookFormContent({
     setError(null);
     setFieldErrors({});
 
+    const tags = form.tags
+      .split(/[,，]/)
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+
     startTransition(async () => {
       const result = await saveBookAction({
         id: book?.id,
-        name: form.name,
-        description: form.description,
-        level: form.level,
+        title: form.title,
         wordCount: Number(form.wordCount),
-        status: form.status,
+        coverUrl: form.coverUrl,
+        bookld: form.bookld,
+        tags,
       });
 
       if (result.ok) {
@@ -115,8 +104,8 @@ function BookFormContent({
         <DialogTitle>{book ? "编辑单词书" : "新增单词书"}</DialogTitle>
         <DialogDescription>
           {book
-            ? "修改单词书的基础信息，保存后立即生效。"
-            : "填写单词书信息，创建后可继续编辑。"}
+            ? "修改单词书信息，保存后立即生效。"
+            : "填写单词书信息，bookId 需与单词数据中的 bookld 对应。"}
         </DialogDescription>
       </DialogHeader>
 
@@ -131,52 +120,25 @@ function BookFormContent({
         ) : null}
 
         <div className="space-y-2">
-          <Label htmlFor="book-name">名称</Label>
+          <Label htmlFor="book-title">标题</Label>
           <Input
-            id="book-name"
-            value={form.name}
+            id="book-title"
+            value={form.title}
             onChange={(event) =>
-              setForm((current) => ({ ...current, name: event.target.value }))
+              setForm((current) => ({ ...current, title: event.target.value }))
             }
             placeholder="例如：CET-4 核心词汇"
-            aria-invalid={Boolean(fieldErrors.name)}
+            aria-invalid={Boolean(fieldErrors.title)}
             required
           />
-          {fieldErrors.name ? (
-            <p className="text-xs text-destructive">{fieldErrors.name}</p>
+          {fieldErrors.title ? (
+            <p className="text-xs text-destructive">{fieldErrors.title}</p>
           ) : null}
         </div>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="space-y-2">
-            <Label>级别</Label>
-            <Select
-              value={form.level}
-              onValueChange={(value) =>
-                setForm((current) => ({
-                  ...current,
-                  level: value as BookLevel,
-                }))
-              }
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="选择级别" />
-              </SelectTrigger>
-              <SelectContent>
-                {BOOK_LEVELS.map((level) => (
-                  <SelectItem key={level} value={level}>
-                    {BOOK_LEVEL_LABELS[level]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {fieldErrors.level ? (
-              <p className="text-xs text-destructive">{fieldErrors.level}</p>
-            ) : null}
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="book-word-count">词汇量</Label>
+            <Label htmlFor="book-word-count">单词数量</Label>
             <Input
               id="book-word-count"
               type="number"
@@ -201,47 +163,64 @@ function BookFormContent({
           </div>
 
           <div className="space-y-2">
-            <Label>状态</Label>
-            <Select
-              value={form.status}
-              onValueChange={(value) =>
+            <Label htmlFor="book-bookld">bookId</Label>
+            <Input
+              id="book-bookld"
+              value={form.bookld}
+              onChange={(event) =>
                 setForm((current) => ({
                   ...current,
-                  status: value as BookStatus,
+                  bookld: event.target.value,
                 }))
               }
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="选择状态" />
-              </SelectTrigger>
-              <SelectContent>
-                {BOOK_STATUSES.map((status) => (
-                  <SelectItem key={status} value={status}>
-                    {BOOK_STATUS_LABELS[status]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {fieldErrors.status ? (
-              <p className="text-xs text-destructive">{fieldErrors.status}</p>
+              placeholder="例如：CET4luan_2"
+              aria-invalid={Boolean(fieldErrors.bookld)}
+              required
+            />
+            {fieldErrors.bookld ? (
+              <p className="text-xs text-destructive">{fieldErrors.bookld}</p>
             ) : null}
           </div>
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="book-description">简介</Label>
-          <Textarea
-            id="book-description"
-            value={form.description}
+          <Label htmlFor="book-cover-url">封面 URL</Label>
+          <Input
+            id="book-cover-url"
+            type="url"
+            value={form.coverUrl}
             onChange={(event) =>
               setForm((current) => ({
                 ...current,
-                description: event.target.value,
+                coverUrl: event.target.value,
               }))
             }
-            placeholder="简要说明单词书的适用人群与内容范围"
-            rows={3}
+            placeholder="https://example.com/cover.jpg"
+            aria-invalid={Boolean(fieldErrors.coverUrl)}
           />
+          {fieldErrors.coverUrl ? (
+            <p className="text-xs text-destructive">{fieldErrors.coverUrl}</p>
+          ) : null}
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="book-tags">标签</Label>
+          <Input
+            id="book-tags"
+            value={form.tags}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, tags: event.target.value }))
+            }
+            placeholder="四级, 核心, 高频"
+            aria-invalid={Boolean(fieldErrors.tags)}
+          />
+          {fieldErrors.tags ? (
+            <p className="text-xs text-destructive">{fieldErrors.tags}</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              多个标签用逗号分隔，最多 10 个
+            </p>
+          )}
         </div>
 
         <DialogFooter>

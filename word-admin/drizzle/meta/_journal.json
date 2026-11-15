@@ -8,6 +8,13 @@
       "when": 1794742793145,
       "tag": "0000_dry_moon_knight",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794746763589,
+      "tag": "0001_freezing_rumiko_fujikawa",
+      "breakpoints": true
     }
   ]
 }

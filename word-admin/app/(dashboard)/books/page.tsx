@@ -16,7 +16,7 @@ export default function BooksPage() {
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
       <PageHeader
         title="单词书管理"
-        description="维护学习端展示的单词书、词汇量与发布状态。"
+        description="维护单词书的封面、标题、单词数量与 bookId，并与 words 表数据关联。"
       />
       <Suspense fallback={<BooksSkeleton />}>
         <BooksSection />

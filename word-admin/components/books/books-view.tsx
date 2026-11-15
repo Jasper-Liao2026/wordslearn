@@ -1,14 +1,16 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element */
+
 import {
   BookOpenText,
-  CheckCircle2,
   Inbox,
   Layers,
   Loader2,
   Pencil,
   Plus,
   Search,
+  Tags,
   Trash2,
 } from "lucide-react";
 import { useMemo, useState, useTransition } from "react";
@@ -29,13 +31,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   Table,
   TableBody,
   TableCell,
@@ -43,18 +38,30 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatDate, formatNumber } from "@/lib/format";
-import {
-  BOOK_LEVELS,
-  BOOK_LEVEL_LABELS,
-  BOOK_STATUS_LABELS,
-  type Book,
-  type BookLevel,
-} from "@/lib/types";
+import { formatNumber } from "@/lib/format";
+import type { Book } from "@/lib/types";
+
+function BookCover({ src, title }: { src: string | null; title: string }) {
+  const [failed, setFailed] = useState(false);
+
+  return (
+    <div className="flex h-14 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border bg-muted">
+      {src && !failed ? (
+        <img
+          src={src}
+          alt={`${title} 封面`}
+          className="size-full object-cover"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <BookOpenText className="size-4 text-muted-foreground" />
+      )}
+    </div>
+  );
+}
 
 export function BooksView({ books }: { books: Book[] }) {
   const [query, setQuery] = useState("");
-  const [level, setLevel] = useState<"all" | BookLevel>("all");
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Book | null>(null);
   const [deleting, setDeleting] = useState<Book | null>(null);
@@ -63,20 +70,19 @@ export function BooksView({ books }: { books: Book[] }) {
 
   const filtered = useMemo(() => {
     const keyword = query.trim().toLowerCase();
-    return books.filter((book) => {
-      const matchesLevel = level === "all" || book.level === level;
-      const matchesKeyword =
-        !keyword ||
-        book.name.toLowerCase().includes(keyword) ||
-        book.description.toLowerCase().includes(keyword);
-      return matchesLevel && matchesKeyword;
-    });
-  }, [books, level, query]);
+    if (!keyword) {
+      return books;
+    }
+    return books.filter(
+      (book) =>
+        book.title.toLowerCase().includes(keyword) ||
+        book.bookld.toLowerCase().includes(keyword) ||
+        book.tags.some((tag) => tag.toLowerCase().includes(keyword))
+    );
+  }, [books, query]);
 
-  const publishedCount = books.filter(
-    (book) => book.status === "published"
-  ).length;
   const totalWords = books.reduce((sum, book) => sum + book.wordCount, 0);
+  const totalTags = new Set(books.flatMap((book) => book.tags)).size;
 
   function openCreate() {
     setEditing(null);
@@ -114,20 +120,20 @@ export function BooksView({ books }: { books: Book[] }) {
         <StatCard
           label="单词书总数"
           value={formatNumber(books.length)}
-          hint="包含草稿与已发布"
+          hint="管理端已录入的单词书"
           icon={<BookOpenText className="size-5" />}
         />
         <StatCard
-          label="已发布"
-          value={formatNumber(publishedCount)}
-          hint={`草稿 ${books.length - publishedCount} 本`}
-          icon={<CheckCircle2 className="size-5" />}
+          label="单词总量"
+          value={formatNumber(totalWords)}
+          hint="所有单词书单词数之和"
+          icon={<Layers className="size-5" />}
         />
         <StatCard
-          label="总词汇量"
-          value={formatNumber(totalWords)}
-          hint="所有单词书词汇量之和"
-          icon={<Layers className="size-5" />}
+          label="标签数量"
+          value={formatNumber(totalTags)}
+          hint="去重后的标签总数"
+          icon={<Tags className="size-5" />}
         />
       </div>
 
@@ -138,28 +144,11 @@ export function BooksView({ books }: { books: Book[] }) {
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索单词书名称或简介"
+              placeholder="搜索标题、bookId 或标签"
               className="pl-9"
               aria-label="搜索单词书"
             />
           </div>
-
-          <Select
-            value={level}
-            onValueChange={(value) => setLevel(value as "all" | BookLevel)}
-          >
-            <SelectTrigger className="w-full sm:w-36" aria-label="按级别筛选">
-              <SelectValue placeholder="全部级别" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部级别</SelectItem>
-              {BOOK_LEVELS.map((item) => (
-                <SelectItem key={item} value={item}>
-                  {BOOK_LEVEL_LABELS[item]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
 
           <div className="sm:ml-auto">
             <Button onClick={openCreate} className="w-full sm:w-auto">
@@ -172,11 +161,11 @@ export function BooksView({ books }: { books: Book[] }) {
         <Table>
           <TableHeader>
             <TableRow className="bg-muted/40 hover:bg-muted/40">
-              <TableHead className="px-4">单词书</TableHead>
-              <TableHead className="px-4">级别</TableHead>
-              <TableHead className="px-4">词汇量</TableHead>
-              <TableHead className="px-4">状态</TableHead>
-              <TableHead className="px-4">更新时间</TableHead>
+              <TableHead className="px-4">封面</TableHead>
+              <TableHead className="px-4">标题</TableHead>
+              <TableHead className="px-4">单词数量</TableHead>
+              <TableHead className="px-4">bookId</TableHead>
+              <TableHead className="px-4">标签</TableHead>
               <TableHead className="px-4 text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
@@ -188,7 +177,9 @@ export function BooksView({ books }: { books: Book[] }) {
                     <Inbox className="size-8 text-muted-foreground" />
                     <p className="text-sm font-medium">没有找到匹配的单词书</p>
                     <p className="text-xs text-muted-foreground">
-                      尝试调整搜索关键词或筛选条件
+                      {books.length === 0
+                        ? "点击右上角「新增单词书」创建第一本单词书"
+                        : "尝试调整搜索关键词"}
                     </p>
                   </div>
                 </TableCell>
@@ -197,32 +188,33 @@ export function BooksView({ books }: { books: Book[] }) {
               filtered.map((book) => (
                 <TableRow key={book.id}>
                   <TableCell className="px-4 py-3">
-                    <div className="max-w-[320px]">
-                      <p className="font-medium">{book.name}</p>
-                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {book.description || "暂无简介"}
-                      </p>
-                    </div>
+                    <BookCover src={book.coverUrl} title={book.title} />
                   </TableCell>
                   <TableCell className="px-4 py-3">
-                    <Badge variant="outline">
-                      {BOOK_LEVEL_LABELS[book.level]}
-                    </Badge>
+                    <p className="max-w-[260px] truncate font-medium">
+                      {book.title}
+                    </p>
                   </TableCell>
                   <TableCell className="px-4 py-3 tabular-nums">
                     {formatNumber(book.wordCount)}
                   </TableCell>
                   <TableCell className="px-4 py-3">
-                    <Badge
-                      variant={
-                        book.status === "published" ? "success" : "warning"
-                      }
-                    >
-                      {BOOK_STATUS_LABELS[book.status]}
-                    </Badge>
+                    <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                      {book.bookld}
+                    </code>
                   </TableCell>
-                  <TableCell className="px-4 py-3 text-muted-foreground">
-                    {formatDate(book.updatedAt)}
+                  <TableCell className="px-4 py-3">
+                    {book.tags.length === 0 ? (
+                      <span className="text-xs text-muted-foreground">-</span>
+                    ) : (
+                      <div className="flex max-w-[240px] flex-wrap gap-1">
+                        {book.tags.map((tag) => (
+                          <Badge key={tag} variant="secondary">
+                            {tag}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1">
@@ -231,7 +223,7 @@ export function BooksView({ books }: { books: Book[] }) {
                         size="icon"
                         className="size-8"
                         title="编辑"
-                        aria-label={`编辑 ${book.name}`}
+                        aria-label={`编辑 ${book.title}`}
                         onClick={() => openEdit(book)}
                       >
                         <Pencil className="size-4" />
@@ -241,7 +233,7 @@ export function BooksView({ books }: { books: Book[] }) {
                         size="icon"
                         className="size-8 text-muted-foreground hover:text-destructive"
                         title="删除"
-                        aria-label={`删除 ${book.name}`}
+                        aria-label={`删除 ${book.title}`}
                         onClick={() => openDelete(book)}
                       >
                         <Trash2 className="size-4" />
@@ -261,7 +253,7 @@ export function BooksView({ books }: { books: Book[] }) {
               ? `（总计 ${books.length} 本）`
               : ""}
           </span>
-          <span>数据保存在本地 JSON 文件中</span>
+          <span>数据保存在 Supabase 数据库中</span>
         </div>
       </div>
 
@@ -283,7 +275,8 @@ export function BooksView({ books }: { books: Book[] }) {
           <DialogHeader>
             <DialogTitle>删除单词书</DialogTitle>
             <DialogDescription>
-              确定要删除「{deleting?.name}」吗？删除后无法恢复。
+              确定要删除「{deleting?.title}」吗？删除后无法恢复，但不会影响
+              words 表中已导入的单词数据。
             </DialogDescription>
           </DialogHeader>
 

@@ -1,4 +1,4 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   bigint,
   index,
@@ -71,3 +71,35 @@ export const words = pgTable("words", {
 });
 
 export type WordRow = typeof words.$inferSelect;
+
+/** 单词书表：管理端维护，通过 bookld 与 words 关联 */
+export const books = pgTable("books", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  title: text("title").notNull(),
+  wordCount: integer("word_count").notNull().default(0),
+  coverUrl: text("cover_url"),
+  bookld: text("bookld").notNull().unique(),
+  tags: text("tags")
+    .array()
+    .notNull()
+    .default(sql`'{}'::text[]`),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+export const booksRelations = relations(books, ({ many }) => ({
+  words: many(words),
+}));
+
+export const wordsRelations = relations(words, ({ one }) => ({
+  book: one(books, {
+    fields: [words.bookld],
+    references: [books.bookld],
+  }),
+}));
+
+export type BookRow = typeof books.$inferSelect;
