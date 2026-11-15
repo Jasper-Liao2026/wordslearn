@@ -8,6 +8,13 @@
       "when": 1794750060572,
       "tag": "0000_woozy_wrecker",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794752020330,
+      "tag": "0001_shallow_kitty_pryde",
+      "breakpoints": true
     }
   ]
 }

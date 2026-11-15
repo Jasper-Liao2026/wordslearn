@@ -141,3 +141,94 @@ export type WordRow = typeof words.$inferSelect;
 export type AppUserRow = typeof appUsers.$inferSelect;
 export type AppSessionRow = typeof appSessions.$inferSelect;
 export type LearningProgressRow = typeof learningProgress.$inferSelect;
+
+/** 单词书维度进度（每个用户每本书一条） */
+export const userBookProgress = pgTable(
+  "user_book_progress",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUsers.id, { onDelete: "cascade" }),
+    bookld: text("bookld")
+      .notNull()
+      .references(() => books.bookld, { onDelete: "cascade" }),
+    lastWordRank: integer("last_word_rank").notNull().default(0),
+    learnedCount: integer("learned_count").notNull().default(0),
+    completed: boolean("completed").notNull().default(false),
+    lastStudiedAt: timestamp("last_studied_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("user_book_progress_user_book_unique").on(
+      table.userId,
+      table.bookld
+    ),
+    index("user_book_progress_user_recent_idx").on(
+      table.userId,
+      table.lastStudiedAt
+    ),
+  ]
+);
+
+/** 单词维度进度（每个用户每本书每个单词一条） */
+export const userWordProgress = pgTable(
+  "user_word_progress",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUsers.id, { onDelete: "cascade" }),
+    bookld: text("bookld")
+      .notNull()
+      .references(() => books.bookld, { onDelete: "cascade" }),
+    wordRank: integer("word_rank").notNull(),
+    learnedAt: timestamp("learned_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("user_word_progress_user_book_word_unique").on(
+      table.userId,
+      table.bookld,
+      table.wordRank
+    ),
+    index("user_word_progress_user_book_idx").on(table.userId, table.bookld),
+  ]
+);
+
+export const userBookProgressRelations = relations(
+  userBookProgress,
+  ({ one }) => ({
+    user: one(appUsers, {
+      fields: [userBookProgress.userId],
+      references: [appUsers.id],
+    }),
+    book: one(books, {
+      fields: [userBookProgress.bookld],
+      references: [books.bookld],
+    }),
+  })
+);
+
+export const userWordProgressRelations = relations(
+  userWordProgress,
+  ({ one }) => ({
+    user: one(appUsers, {
+      fields: [userWordProgress.userId],
+      references: [appUsers.id],
+    }),
+    book: one(books, {
+      fields: [userWordProgress.bookld],
+      references: [books.bookld],
+    }),
+  })
+);
+
+export type UserBookProgressRow = typeof userBookProgress.$inferSelect;
+export type UserWordProgressRow = typeof userWordProgress.$inferSelect;
+
