@@ -1,6 +1,9 @@
 import { relations } from "drizzle-orm";
 import {
+  bigint,
   index,
+  integer,
+  json,
   pgEnum,
   pgTable,
   text,
@@ -55,3 +58,16 @@ export const adminSessionsRelations = relations(adminSessions, ({ one }) => ({
 
 export type AdminUserRow = typeof adminUsers.$inferSelect;
 export type AdminRole = AdminUserRow["role"];
+
+/** 单词表：数据来自 CET4 词库导入 */
+export const words = pgTable("words", {
+  id: bigint("id", { mode: "number" })
+    .primaryKey()
+    .generatedByDefaultAsIdentity(),
+  wordRand: integer("wordRand"),
+  headWord: text("headWord"),
+  content: json("content"),
+  bookld: text("bookld"),
+});
+
+export type WordRow = typeof words.$inferSelect;
