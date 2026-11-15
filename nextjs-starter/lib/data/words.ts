@@ -23,6 +23,36 @@ export async function getWordCount(bookld: string): Promise<number> {
   return row?.value ?? 0;
 }
 
+/** 各单词书在 words 表中的实际单词数（books.word_count 可能与之不一致） */
+export async function getWordTotals(): Promise<Map<string, number>> {
+  const rows = await db
+    .select({ bookld: words.bookld, total: count() })
+    .from(words)
+    .groupBy(words.bookld);
+
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    if (row.bookld) totals.set(row.bookld, row.total);
+  }
+  return totals;
+}
+
+/** 批量取某排名之后的单词，用于学习页预取窗口 */
+export async function getWordsAfter(
+  bookld: string,
+  afterRank: number,
+  limit: number
+): Promise<Word[]> {
+  const rows = await db
+    .select()
+    .from(words)
+    .where(and(eq(words.bookld, bookld), gt(words.wordRand, afterRank)))
+    .orderBy(asc(words.wordRand))
+    .limit(limit);
+
+  return rows.map(toWord);
+}
+
 export async function getWordByRank(
   bookld: string,
   wordRand: number

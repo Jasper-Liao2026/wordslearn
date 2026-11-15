@@ -3,7 +3,7 @@ import { and, count, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { books, userBookProgress, userWordProgress } from "@/db/schema";
 import type { Book, BookProgress, ProgressEntry, SaveProgressResult } from "@/lib/app/types";
-import { getNextWord, getWordCount } from "@/lib/data/words";
+import { getNextWord, getWordCount, getWordTotals } from "@/lib/data/words";
 
 function toProgress(row: typeof userBookProgress.$inferSelect): BookProgress {
   return {
@@ -43,16 +43,19 @@ function countLearned(userId: string, bookld: string) {
 
 /** 我的页面 / 首页最近学习：按最近学习时间倒序 */
 export async function getProgressList(userId: string): Promise<ProgressEntry[]> {
-  const rows = await db
-    .select({ progress: userBookProgress, book: books })
-    .from(userBookProgress)
-    .innerJoin(books, eq(userBookProgress.bookld, books.bookld))
-    .where(eq(userBookProgress.userId, userId))
-    .orderBy(desc(userBookProgress.lastStudiedAt));
+  const [rows, totals] = await Promise.all([
+    db
+      .select({ progress: userBookProgress, book: books })
+      .from(userBookProgress)
+      .innerJoin(books, eq(userBookProgress.bookld, books.bookld))
+      .where(eq(userBookProgress.userId, userId))
+      .orderBy(desc(userBookProgress.lastStudiedAt)),
+    getWordTotals(),
+  ]);
 
   return rows.map(({ progress, book }) => ({
     progress: toProgress(progress),
-    book: toBook(book),
+    book: { ...toBook(book), wordCount: totals.get(book.bookld) ?? book.wordCount },
   }));
 }
 

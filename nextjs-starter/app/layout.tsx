@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { connection } from "next/server";
 
 import { AppProvider } from "@/lib/app/store";
+import { ToastProvider } from "@/lib/app/toast";
 import { getCurrentUser } from "@/lib/auth/session";
 import { getBooks } from "@/lib/data/books";
 import { getProgressList } from "@/lib/data/progress";
@@ -35,9 +36,11 @@ export default async function RootLayout({
   return (
     <html lang="zh-CN">
       <body>
-        <AppProvider user={user} books={books} initialProgress={progress}>
-          {children}
-        </AppProvider>
+        <ToastProvider>
+          <AppProvider user={user} books={books} initialProgress={progress}>
+            {children}
+          </AppProvider>
+        </ToastProvider>
       </body>
     </html>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Loader2 } from "lucide-react";
 
@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppData } from "@/lib/app/store";
+import { useToast } from "@/lib/app/toast";
 import type { BookProgress, Word } from "@/lib/app/types";
 import { parseWordCard } from "@/lib/word-content";
 
@@ -28,28 +29,71 @@ type StudyState = {
   completed: boolean;
 };
 
+/** 本地单词窗口大小：切词无需等待网络 */
+const WINDOW_SIZE = 8;
+/** 窗口剩余不足该值时预取下一批 */
+const PREFETCH_THRESHOLD = 3;
+
 export function StudyView({ bookld }: { bookld: string }) {
   const router = useRouter();
   const { user, books, saveProgress, resetProgress } = useAppData();
+  const { show } = useToast();
 
   const book = useMemo(
     () => books.find((item) => item.bookld === bookld) ?? null,
     [books, bookld]
   );
 
-  const [word, setWord] = useState<Word | null>(null);
+  const [queue, setQueue] = useState<Word[]>([]);
+  const [hasMore, setHasMore] = useState(false);
   const [total, setTotal] = useState(0);
   const [position, setPosition] = useState(0);
   const [learned, setLearned] = useState(0);
   const [finished, setFinished] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState("");
   const [restartOpen, setRestartOpen] = useState(false);
+  const prefetchingRef = useRef(false);
+
+  const redirectToLogin = useCallback(
+    (expired: boolean) => {
+      const query = new URLSearchParams({
+        auth: "1",
+        next: `/study/${bookld}`,
+      });
+      if (expired) query.set("reason", "expired");
+      router.replace(`/profile?${query.toString()}`);
+    },
+    [bookld, router]
+  );
+
+  const fetchBatch = useCallback(
+    async (afterRank: number, limit: number): Promise<Word[]> => {
+      const response = await fetch(
+        `/api/books/${bookld}/words?after=${afterRank}&limit=${limit}`,
+        { cache: "no-store" }
+      );
+
+      if (response.status === 401) {
+        redirectToLogin(true);
+        return [];
+      }
+      if (!response.ok) {
+        throw new Error("获取单词失败");
+      }
+
+      const data = (await response.json()) as { words: Word[] };
+      return data.words;
+    },
+    [bookld, redirectToLogin]
+  );
 
   const loadStudy = useCallback(async () => {
     setLoading(true);
     setError("");
+    setNotFound(false);
 
     try {
       const response = await fetch(`/api/books/${bookld}/study`, {
@@ -57,9 +101,11 @@ export function StudyView({ bookld }: { bookld: string }) {
       });
 
       if (response.status === 401) {
-        router.replace(
-          `/profile?auth=1&next=${encodeURIComponent(`/study/${bookld}`)}`
-        );
+        redirectToLogin(true);
+        return;
+      }
+      if (response.status === 404) {
+        setNotFound(true);
         return;
       }
       if (!response.ok) {
@@ -70,60 +116,109 @@ export function StudyView({ bookld }: { bookld: string }) {
       setTotal(data.total);
       setPosition(data.position);
       setLearned(data.progress?.learnedCount ?? 0);
-      setWord(data.word);
-      setFinished(data.completed || !data.word);
+
+      if (data.completed || !data.word) {
+        setQueue([]);
+        setHasMore(false);
+        setFinished(true);
+        return;
+      }
+
+      setFinished(false);
+      setQueue([data.word]);
+
+      try {
+        const batch = await fetchBatch(data.word.wordRand, WINDOW_SIZE - 1);
+        setQueue([data.word, ...batch]);
+        setHasMore(batch.length === WINDOW_SIZE - 1);
+      } catch {
+        setHasMore(false);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "加载失败");
     } finally {
       setLoading(false);
     }
-  }, [bookld, router]);
+  }, [bookld, fetchBatch, redirectToLogin]);
 
   useEffect(() => {
     if (!user) {
-      router.replace(
-        `/profile?auth=1&next=${encodeURIComponent(`/study/${bookld}`)}`
-      );
+      redirectToLogin(false);
       return;
     }
     void loadStudy();
-  }, [user, bookld, loadStudy, router]);
+  }, [user, loadStudy, redirectToLogin]);
+
+  const prefetchTail = useCallback(
+    async (afterRank: number) => {
+      if (prefetchingRef.current) return;
+      prefetchingRef.current = true;
+
+      try {
+        const batch = await fetchBatch(afterRank, WINDOW_SIZE);
+        setHasMore(batch.length === WINDOW_SIZE);
+        setQueue((prev) => {
+          const existing = new Set(prev.map((item) => item.wordRand));
+          return [...prev, ...batch.filter((item) => !existing.has(item.wordRand))];
+        });
+      } catch {
+        // 预取失败不打断当前学习，点击下一个时会再次尝试
+      } finally {
+        prefetchingRef.current = false;
+      }
+    },
+    [fetchBatch]
+  );
 
   const handleNext = async () => {
-    if (!word || saving) return;
+    const current = queue[0];
+    if (!current || saving) return;
 
+    const rest = queue.slice(1);
+    setQueue(rest);
+    setPosition((value) => Math.min(value + 1, total));
     setSaving(true);
-    setError("");
 
-    try {
-      const result = await saveProgress(bookld, word.wordRand);
-      setTotal(result.total);
-      setLearned(result.progress.learnedCount);
+    // 进度异步写入：失败只提示，不阻断切换，下次点击会重试
+    const persistence = saveProgress(bookld, current.wordRand)
+      .then((result) => {
+        setLearned(result.progress.learnedCount);
+        setTotal(result.total);
+      })
+      .catch(() => {
+        show("进度保存失败，请检查网络后重试", "error");
+      });
 
-      if (result.nextWord) {
-        setWord(result.nextWord);
-        setPosition(Math.min(result.progress.learnedCount + 1, result.total));
-      } else {
-        setWord(null);
+    if (rest.length === 0) {
+      if (!hasMore) {
         setFinished(true);
-        setPosition(result.total);
+      } else {
+        try {
+          const batch = await fetchBatch(current.wordRand, WINDOW_SIZE);
+          setQueue(batch);
+          setHasMore(batch.length === WINDOW_SIZE);
+          if (batch.length === 0) setFinished(true);
+        } catch {
+          setFinished(true);
+        }
       }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "保存进度失败");
-    } finally {
-      setSaving(false);
+    } else if (rest.length <= PREFETCH_THRESHOLD && hasMore) {
+      void prefetchTail(rest[rest.length - 1].wordRand);
     }
+
+    await persistence;
+    setSaving(false);
   };
 
   const handleRestart = async () => {
     setRestartOpen(false);
-    setFinished(false);
 
     try {
       await resetProgress(bookld);
+      setFinished(false);
       await loadStudy();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "重置进度失败");
+    } catch {
+      show("重置进度失败，请稍后重试", "error");
     }
   };
 
@@ -146,6 +241,20 @@ export function StudyView({ bookld }: { bookld: string }) {
           <Loader2 className="size-3.5 animate-spin" />
           正在获取单词…
         </div>
+      </div>
+    );
+  }
+
+  if (notFound) {
+    return (
+      <div className="mx-auto flex min-h-dvh max-w-[480px] flex-col items-center justify-center gap-4 bg-background px-6 text-center">
+        <p className="text-base font-semibold">单词书不存在</p>
+        <p className="text-xs text-muted-foreground">
+          该单词书可能已被移除，换个单词书试试吧
+        </p>
+        <Button variant="outline" onClick={() => router.replace("/")}>
+          返回首页
+        </Button>
       </div>
     );
   }
@@ -228,6 +337,7 @@ export function StudyView({ bookld }: { bookld: string }) {
     );
   }
 
+  const word = queue[0];
   if (!word) {
     return null;
   }

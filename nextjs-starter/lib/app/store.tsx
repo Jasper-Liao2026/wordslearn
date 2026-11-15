@@ -11,6 +11,7 @@ import {
 import { useRouter } from "next/navigation";
 
 import { signOutAction } from "@/app/actions/auth";
+import { useToast } from "@/lib/app/toast";
 import type {
   AppUser,
   Book,
@@ -53,6 +54,7 @@ export function AppProvider({
   initialProgress: ProgressEntry[];
 }) {
   const router = useRouter();
+  const { show } = useToast();
   const [progressList, setProgressList] =
     useState<ProgressEntry[]>(initialProgress);
 
@@ -131,9 +133,10 @@ export function AppProvider({
   const signOut = useCallback(async () => {
     await signOutAction();
     setProgressList([]);
+    show("已退出登录");
     router.replace("/");
     router.refresh();
-  }, [router]);
+  }, [router, show]);
 
   const value = useMemo<AppDataContextValue>(
     () => ({

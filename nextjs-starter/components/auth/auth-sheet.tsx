@@ -8,11 +8,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { signInAction, signUpAction } from "@/app/actions/auth";
+import { useToast } from "@/lib/app/toast";
 import { cn } from "@/lib/utils";
 
 type Mode = "signin" | "signup";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const STRONG_PASSWORD_RE = /^(?=.*[A-Za-z])(?=.*\d).{8,64}$/;
 
 function safeNext(value: string | null) {
   if (!value) return null;
@@ -23,8 +25,10 @@ export function AuthSheet() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const { show } = useToast();
 
   const open = searchParams.get("auth") === "1";
+  const expired = searchParams.get("reason") === "expired";
 
   const [mode, setMode] = useState<Mode>("signin");
   const [email, setEmail] = useState("");
@@ -55,6 +59,7 @@ export function AuthSheet() {
     const params = new URLSearchParams(searchParams.toString());
     params.delete("auth");
     params.delete("next");
+    params.delete("reason");
     const query = params.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
   };
@@ -87,7 +92,11 @@ export function AuthSheet() {
       setError("请输入有效的邮箱地址");
       return;
     }
-    if (password.length < 6) {
+    if (mode === "signup" && !STRONG_PASSWORD_RE.test(password)) {
+      setError("密码需 8–64 位，且同时包含字母和数字");
+      return;
+    }
+    if (mode === "signin" && password.length < 6) {
       setError("密码至少 6 位");
       return;
     }
@@ -109,6 +118,7 @@ export function AuthSheet() {
         return;
       }
 
+      show(mode === "signup" ? "注册成功" : "登录成功", "success");
       const next = safeNext(searchParams.get("next"));
       router.replace(next ?? pathname, { scroll: false });
       router.refresh();
@@ -150,7 +160,9 @@ export function AuthSheet() {
             {mode === "signin" ? "登录 WordsLearn" : "创建账号"}
           </h2>
           <p className="text-xs text-muted-foreground">
-            登录后可同步学习进度，随时继续上次的学习
+            {expired
+              ? "登录已过期，请重新登录后继续学习"
+              : "登录后可同步学习进度，随时继续上次的学习"}
           </p>
         </div>
 
@@ -206,7 +218,7 @@ export function AuthSheet() {
                 autoComplete={
                   mode === "signin" ? "current-password" : "new-password"
                 }
-                placeholder="至少 6 位"
+                placeholder={mode === "signup" ? "至少 8 位，含字母和数字" : "至少 6 位"}
                 className="h-11 pl-9 pr-10 text-base"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}

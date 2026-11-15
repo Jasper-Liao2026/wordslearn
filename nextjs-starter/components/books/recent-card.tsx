@@ -7,6 +7,21 @@ import { ChevronRight, Clock3, Sparkles } from "lucide-react";
 
 import type { ProgressEntry } from "@/lib/app/types";
 
+function formatRecentTime(iso: string) {
+  const date = new Date(iso);
+  const now = new Date();
+  const startOfDay = (value: Date) =>
+    new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(date)) / 86400000);
+  const hm = `${String(date.getHours()).padStart(2, "0")}:${String(
+    date.getMinutes()
+  ).padStart(2, "0")}`;
+
+  if (dayDiff === 0) return `今天 ${hm}`;
+  if (dayDiff === 1) return `昨天 ${hm}`;
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
 export function RecentCard({ entry }: { entry: ProgressEntry }) {
   const [coverFailed, setCoverFailed] = useState(false);
   const { book, progress } = entry;
@@ -47,11 +62,15 @@ export function RecentCard({ entry }: { entry: ProgressEntry }) {
             <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
           </div>
 
-          <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
-            <Clock3 className="size-3" />
+          <p className="mt-1 text-xs text-muted-foreground">
             {progress.completed
               ? "已完成 · 可再次巩固"
-              : `已学 ${progress.learnedCount} / ${total} 词`}
+              : `已学 ${progress.learnedCount} / ${total} 词 · ${percent}%`}
+          </p>
+
+          <p className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
+            <Clock3 className="size-3" />
+            最近：{formatRecentTime(progress.lastStudiedAt)}
           </p>
 
           <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">

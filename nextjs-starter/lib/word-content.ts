@@ -47,11 +47,13 @@ export function parseWordCard(word: Word): WordCardData {
   const trans = array<UnknownRecord>(content?.trans);
   const sentences = array<UnknownRecord>(record(content?.sentence)?.sentences);
   const usphone = str(content?.usphone);
+  const ukphone = str(content?.ukphone);
   const phone = str(content?.phone);
+  const primaryPhone = usphone ?? ukphone ?? phone;
 
   return {
     headWord: word.headWord || str(record(record(word.content)?.word)?.wordHead) || "",
-    phone: usphone ? `/${usphone}/` : phone ? `/${phone}/` : null,
+    phone: primaryPhone ? `/${primaryPhone}/` : null,
     tranCn: str(trans[0]?.tranCn) ?? "暂无释义",
     sentence: sentences[0]
       ? {

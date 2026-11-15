@@ -41,11 +41,12 @@ export function WordDetailView({
       });
 
       if (response.status === 401) {
-        router.replace(
-          `/profile?auth=1&next=${encodeURIComponent(
-            `/study/${bookld}/word/${wordRank}`
-          )}`
-        );
+        const query = new URLSearchParams({
+          auth: "1",
+          next: `/study/${bookld}/word/${wordRank}`,
+          reason: "expired",
+        });
+        router.replace(`/profile?${query.toString()}`);
         return;
       }
       if (!response.ok) {
@@ -63,11 +64,11 @@ export function WordDetailView({
 
   useEffect(() => {
     if (!user) {
-      router.replace(
-        `/profile?auth=1&next=${encodeURIComponent(
-          `/study/${bookld}/word/${wordRank}`
-        )}`
-      );
+      const query = new URLSearchParams({
+        auth: "1",
+        next: `/study/${bookld}/word/${wordRank}`,
+      });
+      router.replace(`/profile?${query.toString()}`);
       return;
     }
     void loadWord();
@@ -110,6 +111,14 @@ export function WordDetailView({
       setPlaying(null);
       speakFallback(detail.headWord, accent);
     });
+  };
+
+  const goBack = () => {
+    if (window.history.length > 1) {
+      router.back();
+      return;
+    }
+    router.push(`/study/${bookld}`);
   };
 
   if (!user) {
@@ -157,7 +166,7 @@ export function WordDetailView({
         <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b border-border/60 bg-background/95 px-3 backdrop-blur">
           <button
             type="button"
-            onClick={() => router.push(`/study/${bookld}`)}
+            onClick={goBack}
             className="rounded-full p-2 text-muted-foreground hover:bg-muted"
             aria-label="返回学习页"
           >
