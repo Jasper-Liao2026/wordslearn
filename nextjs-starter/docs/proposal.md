@@ -193,7 +193,7 @@ Tab 切换不刷新页面，保留各自滚动位置。
 
 **最近学习定义**
 
-- 取当前用户 `learning_progress` 中 `last_studied_at` 最新的一条记录
+- 取当前用户 `user_book_progress` 中 `last_studied_at` 最新的一条记录
 - 该记录对应单词书仍存在时展示
 - 无任何学习记录时不展示该模块（不是展示空卡片）
 
@@ -427,9 +427,12 @@ Tab 切换不刷新页面，保留各自滚动位置。
 - 主按钮「下一个」
 - 可选（P2）「上一个」、左右滑动切换
 - 点击「下一个」时：
-  1. 写入/更新学习进度（`last_word_rank` = 当前 `wordRand`）
-  2. 切换到下一单词
-  3. 已是最后一个 → 展示学习完成态
+  1. 立即从本地单词窗口（`WINDOW_SIZE = 8`）取下一个并渲染，不等待网络
+  2. 异步请求 `POST /api/progress` 保存进度（`last_word_rank` = 当前 `wordRand`）
+  3. 窗口剩余 ≤ 3 条时预取下一批（`GET /api/books/[bookld]/words`）
+  4. 已是最后一个 → 展示学习完成态
+
+进度保存失败仅 Toast 提示，不阻断切换，下次点击时重试。
 
 **开始位置规则**
 
@@ -497,7 +500,7 @@ Tab 切换不刷新页面，保留各自滚动位置。
 └─────────────────────────────────┘
 ```
 
-- 「再学一遍」：进度重置为 0（`last_word_rank = 0`、`completed = false`），从第一个单词重新开始
+- 「再学一遍」：删除两张进度表中该单词书的记录（相当于 `last_word_rank = 0`、`completed = false`），从第一个单词重新开始
 - 重置需二次确认
 
 ---
@@ -581,27 +584,27 @@ sequenceDiagram
   participant S as 学习页
   participant D as 数据库
   U->>S: 进入 /study/{bookld}
-  S->>D: 查询进度 + 下一个单词
+  S->>D: 查询 user_book_progress + 下一个单词
   D-->>S: word(或完成态)
   U->>S: 点击「下一个」
-  S->>D: upsert 进度(last_word_rank)
+  S->>D: 写入 user_word_progress（去重）+ upsert user_book_progress
   S->>D: 查询下一单词
   D-->>S: 下一单词 / 完成
 ```
 
 ### 7.3 进度规则
 
-- 进度粒度为「用户 + 单词书」，唯一键 `(user_id, bookld)`
-- `last_word_rank` 表示**最后学习过的** `wordRand`
-- `learned_count` 表示已学单词数（首次学习某词 +1；重复学习不重复计数）
-- 到达末尾时 `completed = true`
-- 「再学一遍」重置 `last_word_rank = 0`、`learned_count = 0`、`completed = false`
+- 进度分两张表：单词书维度 `user_book_progress`（唯一键 `(user_id, bookld)`）与单词维度 `user_word_progress`（唯一键 `(user_id, bookld, word_rank)`）
+- `user_book_progress.last_word_rank` 表示**最后学习过的** `wordRand`
+- 每学一个单词向 `user_word_progress` 插入一条（冲突忽略），`learned_count` 由该表去重计数得出，重复学习不累加
+- 到达末尾时 `completed = true`（以实际查询不到更大的 `wordRand` 为准）
+- 「再学一遍」删除两张表中该用户该单词书的记录，从第一个单词重新开始
 
 ---
 
 ## 8. 数据模型
 
-> 复用现有 Supabase 项目的 `books`、`words` 表；新增 `app_users`、`app_sessions`、`learning_progress`。
+> 复用现有 Supabase 项目的 `books`、`words` 表；新增 `app_users`、`app_sessions`、`user_book_progress`、`user_word_progress`。
 
 ### 8.1 app_users
 
@@ -623,50 +626,113 @@ sequenceDiagram
 | expires_at | timestamptz | not null | 过期时间（签发后 7 天） |
 | created_at | timestamptz | not null, default now() | 创建时间 |
 
-### 8.3 learning_progress
+### 8.3 学习进度表（user_book_progress / user_word_progress）
+
+学习进度拆分为「单词书维度」与「单词维度」两张表，分别记录断点位置和逐词学习明细。
+
+#### user_book_progress
+
+```sql
+create table public.user_book_progress (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.app_users (id) on delete cascade,
+  bookld text not null references public.books (bookld) on delete cascade,
+  last_word_rank integer not null default 0,
+  learned_count integer not null default 0,
+  completed boolean not null default false,
+  last_studied_at timestamp with time zone not null default now(),
+  created_at timestamp with time zone not null default now(),
+  updated_at timestamp with time zone not null default now()
+) TABLESPACE pg_default;
+
+create unique index user_book_progress_user_book_unique
+  on public.user_book_progress (user_id, bookld);
+create index user_book_progress_user_recent_idx
+  on public.user_book_progress (user_id, last_studied_at);
+```
 
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | id | uuid | PK | 主键 |
 | user_id | uuid | FK → app_users.id, on delete cascade | 用户 |
-| bookld | text | not null | 关联 `books.bookld` / `words.bookld` |
+| bookld | text | FK → books.bookld, on delete cascade | 关联 `books.bookld` / `words.bookld` |
 | last_word_rank | integer | not null, default 0 | 最后学习的 wordRand |
-| learned_count | integer | not null, default 0 | 已学单词数 |
+| learned_count | integer | not null, default 0 | 已学单词数（由 `user_word_progress` 去重统计） |
 | completed | boolean | not null, default false | 是否学完 |
 | last_studied_at | timestamptz | not null, default now() | 最近学习时间 |
 | created_at | timestamptz | not null, default now() | 创建时间 |
 | updated_at | timestamptz | not null, default now() | 更新时间 |
 
-唯一约束：`unique(user_id, bookld)`；索引：`(user_id, last_studied_at desc)`。
+唯一索引：`(user_id, bookld)`；最近学习索引：`(user_id, last_studied_at)`。
+
+#### user_word_progress
+
+```sql
+create table public.user_word_progress (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.app_users (id) on delete cascade,
+  bookld text not null references public.books (bookld) on delete cascade,
+  word_rank integer not null,
+  learned_at timestamp with time zone not null default now(),
+  created_at timestamp with time zone not null default now()
+) TABLESPACE pg_default;
+
+create unique index user_word_progress_user_book_word_unique
+  on public.user_word_progress (user_id, bookld, word_rank);
+create index user_word_progress_user_book_idx
+  on public.user_word_progress (user_id, bookld);
+```
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| id | uuid | PK | 主键 |
+| user_id | uuid | FK → app_users.id, on delete cascade | 用户 |
+| bookld | text | FK → books.bookld, on delete cascade | 所属单词书 |
+| word_rank | integer | not null | 已学单词的 `wordRand` |
+| learned_at | timestamptz | not null, default now() | 首次学习时间 |
+| created_at | timestamptz | not null, default now() | 创建时间 |
+
+唯一索引：`(user_id, bookld, word_rank)`；普通索引：`(user_id, bookld)`。
+
+数据关系：
+
+- 每个用户在每本单词书的 `user_book_progress` 中最多一条，用于断点续学与「最近学习」
+- 每个用户在每本单词书的每个单词在 `user_word_progress` 中最多一条，用于去重统计 `learned_count`
+- 两张表均通过 `bookld` 外键关联 `books`，单词书删除时级联清理
+- 上述结构由迁移 `drizzle/0001_shallow_kitty_pryde.sql` 创建
 
 ### 8.4 复用表
 
 - `books`：`id, title, word_count, cover_url, bookld, tags, created_at, updated_at`
 - `words`：`id, wordRand, headWord, content(json), bookld`
 
+说明：`books.word_count` 仍由管理端维护，但 H5 展示口径统一为 `words` 表实际条数（服务端 `getWordTotals()` 聚合），首页/我的/最近学习与学习页保持一致；完成判定以实际查询结果为准。
+
 ---
 
-## 9. 接口设计（Server Actions / Route Handlers）
+## 9. 接口设计（Route Handlers + 认证 Server Actions）
+
+学习与进度读取统一走 `app/api/**/route.ts`（Route Handlers）+ `lib/data/*.ts` 服务端数据层，不再使用 Server Actions；只有认证仍使用 Server Actions（`app/actions/auth.ts`）。
 
 | 方法 | 路径 / Action | 说明 | 鉴权 |
 | --- | --- | --- | --- |
-| POST | `signUp` | 注册并登录（邮箱、密码、确认密码） | 否 |
-| POST | `signIn` | 登录（邮箱、密码） | 否 |
-| POST | `signOut` | 退出登录，清除会话 | 是 |
-| GET | `getBooks` | 获取全部单词书 | 否 |
-| GET | `getHomeData` | 首页数据：单词书 + 最近学习 | 否/是 |
-| GET | `getStudyWord(bookld)` | 查询下一个待学单词 + 进度 | 是 |
-| POST | `saveProgress(bookld, wordRand)` | 更新学习进度 | 是 |
-| POST | `resetProgress(bookld)` | 重置进度（再学一遍） | 是 |
-| GET | `getWordDetail(bookld, wordRank)` | 单词详情 | 是 |
-| GET | `getProfile` | 用户信息 + 学习进度汇总 | 是 |
+| POST | `signUpAction`（Server Action） | 注册并登录（邮箱、密码） | 否 |
+| POST | `signInAction`（Server Action） | 登录（邮箱、密码） | 否 |
+| POST | `signOutAction`（Server Action） | 退出登录，清除会话 | 是 |
+| GET | `/api/books/[bookld]/study` | 学习页初始化，返回 `{ progress, total, word, position, completed }`；单词书不存在 404 | 是 |
+| GET | `/api/books/[bookld]/words?after=<rank>&limit=<n>` | 预取 `wordRand > after` 的前 n 个单词（`limit` 上限 20），返回 `{ words }` | 是 |
+| GET | `/api/books/[bookld]/words/[wordRank]` | 单词详情（服务端解析 `words.content`），不存在 404 | 是 |
+| GET | `/api/progress` | 学习进度列表（含单词书信息） | 是 |
+| POST | `/api/progress` | 保存进度 `{ bookld, wordRank }`，同时写两张进度表 | 是 |
+| DELETE | `/api/progress?bookld=<bookld>` | 重置进度（再学一遍），删除两张表记录 | 是 |
 
 约定：
 
+- 首页/我的由根布局 RSC 通过 `lib/data/books.ts`、`lib/data/progress.ts` 直读，再注入客户端 Provider；学习页与进度交互调用上述 Route Handlers
 - 认证方式与会话有效期（7 天）参考 `word-admin` 的 `password.ts` / `session.ts`
 - Cookie：`HttpOnly`、`Secure`（生产）、`SameSite=Lax`、`Path=/`
-- 所有写操作在服务端再次校验会话，不依赖前端状态
-- 服务端返回统一结构：`{ ok: true, data } | { ok: false, message }`
+- 所有写操作在服务端再次校验会话，不依赖前端状态；未登录统一返回 401
+- Route Handler 成功时直接返回 JSON 资源对象，失败返回 `{ error }` 与对应 HTTP 状态码（400/401/404）
 - 邮箱统一小写存储；密码使用 scrypt 加盐哈希
 
 ---
@@ -721,10 +787,10 @@ sequenceDiagram
 
 1. **性能**：首页首屏 LCP < 2.5s（4G）；单词切换响应 < 200ms；封面图懒加载。
 2. **兼容**：iOS Safari 15+、Android Chrome 100+、微信内置浏览器。
-3. **安全**：密码哈希存储；会话 Token 仅存 HttpOnly Cookie；登录/注册接口限流（如 5 次/分钟/IP）；错误文案不泄露账号是否存在。
+3. **安全**：密码哈希存储；会话 Token 仅存 HttpOnly Cookie；登录/注册同 IP + 邮箱每分钟最多 5 次（进程内限流）；错误文案不泄露账号是否存在。
 4. **可访问性**：按钮具备 `aria-label`；文字对比度 ≥ 4.5:1；点击热区 ≥ 44px。
 5. **可维护性**：认证、数据访问、UI 分层；复用 `word-admin` 的 Drizzle/Supabase 接入方式。
-6. **数据一致性**：进度写入使用 upsert，以 `(user_id, bookld)` 保证唯一。
+6. **数据一致性**：`user_book_progress` 按 `(user_id, bookld)` upsert；`user_word_progress` 按 `(user_id, bookld, word_rank)` 去重插入，`learned_count` 由该表统计。
 
 ---
 

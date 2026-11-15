@@ -7,7 +7,7 @@
 | 关联文档 | `docs/proposal.md` |
 | 应用目录 | `wordslearn/nextjs-starter` |
 | 数据来源 | Supabase Postgres（`books`、`words` 已有；本期新增用户与进度表） |
-| 参考实现 | `word-admin`（Drizzle + Supabase、scrypt 密码、HttpOnly 会话、Server Actions） |
+| 参考实现 | `word-admin`（Drizzle + Supabase、scrypt 密码、HttpOnly 会话；认证沿用 Server Actions，学习与进度改为 Route Handlers） |
 
 ---
 
@@ -30,12 +30,13 @@
 | 决策 | 结论 | 理由 |
 | --- | --- | --- |
 | 渲染模式 | App Router + RSC 为主，交互岛屿用 Client Component | 首屏快、鉴权在服务端 |
-| 数据访问 | Drizzle ORM + postgres.js | 与 `word-admin` 保持一致，复用连接配置 |
+| ORM / 驱动 | Drizzle ORM + postgres.js | 与 `word-admin` 保持一致，复用连接配置 |
 | 用户表 | 新建 `app_users` / `app_sessions` | 与管理员 `admin_users` 隔离，避免越权 |
 | 会话 | 随机 Token + Cookie，DB 存 Token 哈希，7 天 | 防重放；与管理员会话互不影响 |
-| 学习进度 | 独立 `learning_progress` 表，`(user_id, bookld)` 唯一 | 支持最近学习、断点续学 |
-| 单词切换 | 客户端预取单词窗口，点击即时切换，后台写进度 | 满足 < 200ms 的切换体验 |
-| 单词书关联 | 通过 `bookld` 逻辑关联 `books` ↔ `words` / `learning_progress` | 沿用现有数据模型 |
+| 学习进度 | 双表：`user_book_progress`（`(user_id, bookld)` 唯一）+ `user_word_progress`（`(user_id, bookld, word_rank)` 唯一） | 断点续学与最近学习走书级表，逐词去重统计走词级表 |
+| 单词切换 | 客户端预取单词窗口（8 条），点击即时切换，后台异步写进度 | 满足 < 200ms 的切换体验 |
+| 数据访问方式 | 学习/进度用 Route Handlers + `lib/data/*.ts`；认证保留 Server Actions | 进度可异步、可重试，接口边界清晰 |
+| 单词书关联 | 通过 `bookld` 逻辑关联 `books` ↔ `words` / `user_book_progress` / `user_word_progress` | 沿用现有数据模型 |
 | 登录入口 | URL `?auth=1` 控制弹窗，服务端感知登录态 | 刷新/深链可恢复，避免闪烁 |
 
 ---
@@ -73,8 +74,9 @@ flowchart TB
 
   subgraph Vercel[Vercel - nextjs-starter]
     RSC[React Server Components]
-    SA[Server Actions]
-    LIB[lib: auth / session / study / words]
+    RH[Route Handlers]
+    SA[Server Actions 认证]
+    LIB[lib: auth / data / app]
   end
 
   subgraph DB[Supabase Postgres]
@@ -82,14 +84,17 @@ flowchart TB
     WORDS[(words)]
     USERS[(app_users)]
     SESS[(app_sessions)]
-    PROG[(learning_progress)]
+    PROG_B[(user_book_progress)]
+    PROG_W[(user_word_progress)]
   end
 
   ADMIN[word-admin 管理后台<br/>独立部署]
 
   UI -->|HTTP / RSC Payload| RSC
-  UI -->|POST Server Action| SA
+  UI -->|fetch /api/*| RH
+  UI -->|POST 登录 / 注册| SA
   RSC --> LIB
+  RH --> LIB
   SA --> LIB
   LIB -->|postgres.js + Drizzle| DB
   ADMIN -->|维护 books / words| DB
@@ -101,8 +106,9 @@ flowchart TB
 | --- | --- | --- |
 | 页面层 | 路由、布局、首屏数据拼装 | `app/**/page.tsx`、`layout.tsx` |
 | 交互层 | 弹窗、卡片切换、表单状态 | `components/**`（`"use client"`） |
-| 动作层 | 登录注册、进度写入、批量取词 | `app/actions/*.ts`（`"use server"`） |
-| 领域层 | 查询封装、内容解析、校验 | `lib/*.ts`、`db/*.ts` |
+| 动作层 | 登录 / 注册 / 退出（Server Actions） | `app/actions/auth.ts`（`"use server"`） |
+| 接口层 | 学习状态、批量取词、单词详情、进度读写（Route Handlers） | `app/api/**/route.ts` |
+| 领域层 | 查询封装、内容解析、校验 | `lib/data/*.ts`、`lib/auth/*.ts`、`lib/word-content.ts`、`db/*.ts` |
 | 数据层 | 表结构、连接、迁移 | `db/schema.ts`、`db/index.ts`、`drizzle/` |
 
 ### 3.3 与 word-admin 的隔离
@@ -111,11 +117,11 @@ flowchart TB
 | --- | --- | --- |
 | 用户表 | `admin_users` | `app_users` |
 | 会话表 | `admin_sessions` | `app_sessions` |
-| Cookie | `word_admin_session` | `word_learn_session` |
+| Cookie | `word_admin_session` | `wordslearn_session` |
 | 登录失败提示 | 管理员语境 | 用户语境 |
 | 部署 | 独立项目 | 独立项目 |
 
-数据库 `books`、`words` 由管理后台写入，H5 只读；`learning_progress` 只由 H5 写入。
+数据库 `books`、`words` 由管理后台写入，H5 只读；`user_book_progress`、`user_word_progress` 只由 H5 写入。
 
 ---
 
@@ -124,45 +130,58 @@ flowchart TB
 ```
 nextjs-starter/
 ├── app/
-│   ├── layout.tsx                      # 根布局：字体、viewport、Toaster
+│   ├── layout.tsx                      # 根布局：ToastProvider + AppProvider、字体、viewport
 │   ├── globals.css                     # Tailwind 4 + 主题变量
+│   ├── error.tsx                       # 全局错误边界（重试）
+│   ├── not-found.tsx                   # 404 页面
 │   ├── (tabs)/
 │   │   ├── layout.tsx                  # 底部 Tab 布局（内容区 + TabBar）
-│   │   ├── page.tsx                    # 首页（RSC）
-│   │   └── profile/page.tsx            # 我的（RSC）
+│   │   ├── loading.tsx                 # 首页骨架屏
+│   │   ├── page.tsx                    # 首页（Client，读取 AppProvider）
+│   │   └── profile/page.tsx            # 我的（Client，登录弹窗 / 进度列表）
 │   ├── study/
 │   │   └── [bookld]/
-│   │       ├── page.tsx                # 学习页（RSC，鉴权）
-│   │       └── word/[wordRank]/page.tsx# 单词详情（RSC，鉴权）
+│   │       ├── page.tsx                # 学习页（渲染 StudyView）
+│   │       └── word/[wordRank]/page.tsx# 单词详情
 │   ├── actions/
-│   │   ├── auth.ts                     # signUp / signIn / signOut
-│   │   └── study.ts                    # saveProgress / loadWordBatch / resetProgress
-│   └── not-found.tsx
+│   │   └── auth.ts                     # signUpAction / signInAction / signOutAction
+│   └── api/
+│       ├── books/[bookld]/study/route.ts        # 学习状态
+│       ├── books/[bookld]/words/route.ts        # 预取单词窗口
+│       ├── books/[bookld]/words/[wordRank]/route.ts  # 单词详情
+│       └── progress/route.ts           # 进度列表 / 保存 / 重置
 ├── components/
 │   ├── layout/tab-bar.tsx              # 底部双 Tab（Client）
 │   ├── auth/auth-sheet.tsx             # 登录/注册底部弹窗（Client）
 │   ├── books/book-card.tsx             # 单词书卡片
 │   ├── books/recent-card.tsx           # 最近学习卡片
-│   ├── study/study-session.tsx         # 学习会话（Client）
+│   ├── study/study-view.tsx            # 学习会话（Client，本地窗口）
 │   ├── study/word-card.tsx             # 极简单词卡片
 │   ├── study/completion-view.tsx       # 完成态
-│   ├── word/word-detail.tsx            # 详情内容
+│   ├── word/word-detail-view.tsx       # 详情内容
 │   └── ui/*                            # shadcn 组件
 ├── db/
 │   ├── index.ts                        # postgres.js + drizzle 实例
-│   └── schema.ts                       # books / words / app_users / app_sessions / learning_progress
-├── drizzle/                            # 迁移 SQL
+│   └── schema.ts                       # books / words / app_users / app_sessions / user_book_progress / user_word_progress
+├── drizzle/                            # 迁移 SQL（0000_woozy_wrecker.sql、0001_shallow_kitty_pryde.sql）
 ├── lib/
-│   ├── auth.ts                         # getCurrentUser / requireUser
-│   ├── session.ts                      # 创建/读取/销毁会话
-│   ├── password.ts                     # scrypt 哈希与校验
-│   ├── users.ts                        # 用户查询与创建
-│   ├── books.ts                        # 首页/单词书查询
-│   ├── study.ts                        # 进度读写、批量取词
-│   ├── words.ts                        # 单词查询与内容解析
-│   ├── validation.ts                   # 邮箱/密码/参数校验
+│   ├── auth/
+│   │   ├── password.ts                 # scrypt 哈希与校验
+│   │   ├── session.ts                  # 创建/读取/销毁会话、getCurrentUser
+│   │   ├── users.ts                    # 用户查询与创建
+│   │   └── rate-limit.ts               # 进程内登录/注册限流
+│   ├── data/
+│   │   ├── books.ts                    # 单词书查询与词数口径统一
+│   │   ├── words.ts                    # 单词查询、取词窗口、词数统计
+│   │   └── progress.ts                 # 两张进度表读写
+│   ├── app/
+│   │   ├── store.tsx                   # AppProvider / useAppData
+│   │   ├── toast.tsx                   # ToastProvider / useToast
+│   │   └── types.ts                    # Book / Word / BookProgress 等类型
+│   ├── word-content.ts                 # words.content 解析（卡片 / 详情）
 │   └── utils.ts                        # cn 等
-├── proxy.ts                            # 路由保护（Next 16 的 middleware）
+├── proxy.ts                            # 路由保护（Next 16 的 middleware，默认导出 proxy）
+├── eslint.config.mjs
 ├── drizzle.config.ts
 ├── components.json
 └── package.json
@@ -226,19 +245,17 @@ create table public.words (
 
 - `content` 保存 `{"word": {...}}` 结构，完整词典信息位于 `content.word.content`
 - `wordRand` 为单词在书内的排序序号，学习顺序以此升序为准
-- `word_count` 是管理端维护的展示值，**完成判定以实际查询结果为准**，不直接依赖该字段
+- `word_count` 仍由管理端维护，但 H5 展示口径统一为 `words` 表实际条数（`getWordTotals()` 聚合），保证首页/我的/最近学习与学习页一致；**完成判定以实际查询结果为准**，不直接依赖该字段
 - `books.bookld` 与 `words.bookld` 为逻辑关联，现有 `words` 未建外键
 
-### 5.2 建议补充索引（对现有表，非破坏性）
+### 5.2 单词查询索引（已创建）
 
-3739 条数据量下并非必须，但取「下一个单词」与详情页均按 `(bookld, wordRand)` 过滤，建议补索引：
+取「下一个单词」、预取窗口与详情页均按 `(bookld, wordRand)` 过滤，该索引已随迁移 `drizzle/0000_woozy_wrecker.sql` 创建：
 
 ```sql
 create index if not exists words_bookld_wordrand_idx
   on public.words (bookld, "wordRand");
 ```
-
-迁移工具：放入下一份 Drizzle 迁移 SQL 中执行。
 
 ### 5.3 新增表
 
@@ -283,10 +300,12 @@ create index app_sessions_expires_at_idx on public.app_sessions (expires_at);
 - 数据库只存 `sha256(token)`，即使库泄露也无法直接复用
 - TTL 7 天，固定过期，不做滑动续期；登录成功时顺带清理过期会话
 
-#### 5.3.3 learning_progress
+#### 5.3.3 学习进度表（user_book_progress / user_word_progress）
+
+> `learning_progress` 为早期设计的单表方案，已废弃，不再读写。
 
 ```sql
-create table public.learning_progress (
+create table public.user_book_progress (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.app_users (id) on delete cascade,
   bookld text not null references public.books (bookld) on delete cascade,
@@ -295,33 +314,62 @@ create table public.learning_progress (
   completed boolean not null default false,
   last_studied_at timestamp with time zone not null default now(),
   created_at timestamp with time zone not null default now(),
-  updated_at timestamp with time zone not null default now(),
-  constraint learning_progress_user_book_unique unique (user_id, bookld)
+  updated_at timestamp with time zone not null default now()
 ) TABLESPACE pg_default;
 
-create index learning_progress_user_recent_idx
-  on public.learning_progress (user_id, last_studied_at desc);
+create unique index user_book_progress_user_book_unique
+  on public.user_book_progress (user_id, bookld);
+create index user_book_progress_user_recent_idx
+  on public.user_book_progress (user_id, last_studied_at);
+
+create table public.user_word_progress (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.app_users (id) on delete cascade,
+  bookld text not null references public.books (bookld) on delete cascade,
+  word_rank integer not null,
+  learned_at timestamp with time zone not null default now(),
+  created_at timestamp with time zone not null default now()
+) TABLESPACE pg_default;
+
+create unique index user_word_progress_user_book_word_unique
+  on public.user_word_progress (user_id, bookld, word_rank);
+create index user_word_progress_user_book_idx
+  on public.user_word_progress (user_id, bookld);
 ```
 
-字段语义：
+`user_book_progress` 字段语义：
 
 | 字段 | 语义 |
 | --- | --- |
 | `last_word_rank` | 最后学习过的 `wordRand`；0 表示尚未开始 |
-| `learned_count` | 已学单词数；仅在 `wordRand` 前进时 +1，重复学习不累加 |
-| `completed` | 是否已学完整本书 |
+| `learned_count` | 已学单词数；由 `user_word_progress` 去重统计后回写 |
+| `completed` | 是否已学完整本书（实际查询不到更大的 `wordRand`） |
 | `last_studied_at` | 最近一次学习时间，用于「最近学习」排序 |
 
-> `bookld` 外键依赖 `books.bookld` 唯一约束；管理后台删除单词书会级联清理进度，符合预期。
+`user_word_progress` 字段语义：
+
+| 字段 | 语义 |
+| --- | --- |
+| `word_rank` | 已学单词的 `wordRand` |
+| `learned_at` | 首次学习该单词的时间 |
+
+约束与关系：
+
+- `user_book_progress` 唯一索引 `(user_id, bookld)`；最近学习索引 `(user_id, last_studied_at)`
+- `user_word_progress` 唯一索引 `(user_id, bookld, word_rank)` 保证逐词去重；普通索引 `(user_id, bookld)`
+- 两张表均通过 `bookld` 外键依赖 `books.bookld` 唯一约束；管理后台删除单词书会级联清理进度
+- 建表迁移：`drizzle/0001_shallow_kitty_pryde.sql`
 
 ### 5.4 ER 图
 
 ```mermaid
 erDiagram
   books ||--o{ words : "bookld（逻辑关联）"
-  books ||--o{ learning_progress : "bookld"
+  books ||--o{ user_book_progress : "bookld"
+  books ||--o{ user_word_progress : "bookld"
   app_users ||--o{ app_sessions : "user_id"
-  app_users ||--o{ learning_progress : "user_id"
+  app_users ||--o{ user_book_progress : "user_id"
+  app_users ||--o{ user_word_progress : "user_id"
 
   books {
     uuid id PK
@@ -354,7 +402,7 @@ erDiagram
     timestamptz expires_at
     timestamptz created_at
   }
-  learning_progress {
+  user_book_progress {
     uuid id PK
     uuid user_id FK
     text bookld FK
@@ -364,6 +412,14 @@ erDiagram
     timestamptz last_studied_at
     timestamptz created_at
     timestamptz updated_at
+  }
+  user_word_progress {
+    uuid id PK
+    uuid user_id FK
+    text bookld FK
+    integer word_rank
+    timestamptz learned_at
+    timestamptz created_at
   }
 ```
 
@@ -428,9 +484,9 @@ export const appSessions = pgTable(
   ]
 );
 
-/** 新增：学习进度 */
-export const learningProgress = pgTable(
-  "learning_progress",
+/** 新增：单词书维度进度（每用户每书一条） */
+export const userBookProgress = pgTable(
+  "user_book_progress",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     userId: uuid("user_id")
@@ -449,14 +505,42 @@ export const learningProgress = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("learning_progress_user_book_unique").on(table.userId, table.bookld),
-    index("learning_progress_user_recent_idx").on(table.userId, table.lastStudiedAt),
+    uniqueIndex("user_book_progress_user_book_unique").on(table.userId, table.bookld),
+    index("user_book_progress_user_recent_idx").on(table.userId, table.lastStudiedAt),
+  ]
+);
+
+/** 新增：单词维度进度（每用户每书每词一条） */
+export const userWordProgress = pgTable(
+  "user_word_progress",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUsers.id, { onDelete: "cascade" }),
+    bookld: text("bookld")
+      .notNull()
+      .references(() => books.bookld, { onDelete: "cascade" }),
+    wordRank: integer("word_rank").notNull(),
+    learnedAt: timestamp("learned_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("user_word_progress_user_book_word_unique").on(
+      table.userId,
+      table.bookld,
+      table.wordRank
+    ),
+    index("user_word_progress_user_book_idx").on(table.userId, table.bookld),
   ]
 );
 
 export const booksRelations = relations(books, ({ many }) => ({
   words: many(words),
-  progress: many(learningProgress),
+  bookProgress: many(userBookProgress),
+  wordProgress: many(userWordProgress),
 }));
 
 export const wordsRelations = relations(words, ({ one }) => ({
@@ -465,16 +549,22 @@ export const wordsRelations = relations(words, ({ one }) => ({
 
 export const appUsersRelations = relations(appUsers, ({ many }) => ({
   sessions: many(appSessions),
-  progress: many(learningProgress),
+  bookProgress: many(userBookProgress),
+  wordProgress: many(userWordProgress),
 }));
 
 export const appSessionsRelations = relations(appSessions, ({ one }) => ({
   user: one(appUsers, { fields: [appSessions.userId], references: [appUsers.id] }),
 }));
 
-export const learningProgressRelations = relations(learningProgress, ({ one }) => ({
-  user: one(appUsers, { fields: [learningProgress.userId], references: [appUsers.id] }),
-  book: one(books, { fields: [learningProgress.bookld], references: [books.bookld] }),
+export const userBookProgressRelations = relations(userBookProgress, ({ one }) => ({
+  user: one(appUsers, { fields: [userBookProgress.userId], references: [appUsers.id] }),
+  book: one(books, { fields: [userBookProgress.bookld], references: [books.bookld] }),
+}));
+
+export const userWordProgressRelations = relations(userWordProgress, ({ one }) => ({
+  user: one(appUsers, { fields: [userWordProgress.userId], references: [appUsers.id] }),
+  book: one(books, { fields: [userWordProgress.bookld], references: [books.bookld] }),
 }));
 ```
 
@@ -557,13 +647,13 @@ export async function verifyPassword(password: string, stored: string): Promise<
 ### 6.2 会话
 
 ```ts
-// lib/session.ts（要点）
-const COOKIE_NAME = "word_learn_session";
+// lib/auth/session.ts（要点）
+const COOKIE_NAME = "wordslearn_session";
 const TTL_SECONDS = 60 * 60 * 24 * 7; // 7 天
 
 export async function createSession(userId: string) {
   const token = randomBytes(32).toString("hex");
-  const tokenHash = sha256(token);
+  const tokenHash = hashToken(token);
   const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000);
 
   await db.delete(appSessions).where(lt(appSessions.expiresAt, new Date()));
@@ -578,30 +668,30 @@ export async function createSession(userId: string) {
   });
 }
 
-export async function readSession(): Promise<{ userId: string } | null> {
-  await connection(); // 明确进入动态渲染
+export async function getCurrentUser(): Promise<SessionUser | null> {
   const token = (await cookies()).get(COOKIE_NAME)?.value;
   if (!token) return null;
 
-  const [session] = await db
-    .select({ userId: appSessions.userId, expiresAt: appSessions.expiresAt })
+  const [row] = await db
+    .select({ id: appUsers.id, email: appUsers.email, createdAt: appUsers.createdAt })
     .from(appSessions)
-    .where(eq(appSessions.tokenHash, sha256(token)))
+    .innerJoin(appUsers, eq(appSessions.userId, appUsers.id))
+    .where(
+      and(
+        eq(appSessions.tokenHash, hashToken(token)),
+        gt(appSessions.expiresAt, new Date())
+      )
+    )
     .limit(1);
 
-  if (!session) return null;
-  if (session.expiresAt.getTime() <= Date.now()) {
-    await db.delete(appSessions).where(eq(appSessions.tokenHash, sha256(token)));
-    return null;
-  }
-  return { userId: session.userId };
+  return row ?? null; // 无会话或已过期返回 null
 }
 
 export async function destroySession() {
   const store = await cookies();
   const token = store.get(COOKIE_NAME)?.value;
   if (token) {
-    await db.delete(appSessions).where(eq(appSessions.tokenHash, sha256(token)));
+    await db.delete(appSessions).where(eq(appSessions.tokenHash, hashToken(token)));
   }
   store.delete(COOKIE_NAME);
 }
@@ -618,19 +708,17 @@ export async function destroySession() {
 ### 6.3 当前用户
 
 ```ts
-// lib/auth.ts
-export async function getCurrentUser(): Promise<AppUserPublic | null> {
-  const session = await readSession();
-  if (!session) return null;
-  return findUserById(session.userId); // 只返回 id / email / createdAt
-}
+// lib/auth/session.ts
+export async function getCurrentUser(): Promise<SessionUser | null> {
+  const token = (await cookies()).get(COOKIE_NAME)?.value;
+  if (!token) return null;
 
-export async function requireUser(): Promise<AppUserPublic> {
-  const user = await getCurrentUser();
-  if (!user) redirect("/profile?auth=1");
-  return user;
+  // 关联 app_sessions + app_users，校验 token_hash 与 expires_at
+  // 只返回 id / email / createdAt；无会话或已过期返回 null
 }
 ```
+
+页面与 Route Handler 均以 `getCurrentUser()` 的返回值判断登录态：Route Handler 返回 401，页面交由 `proxy.ts` 与客户端跳转 `/profile?auth=1&next=...` 引导登录。
 
 ### 6.4 路由保护
 
@@ -639,9 +727,9 @@ export async function requireUser(): Promise<AppUserPublic> {
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const SESSION_COOKIE = "word_learn_session";
+const SESSION_COOKIE = "wordslearn_session";
 
-export function proxy(request: NextRequest) {
+export default function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
   const hasSession = Boolean(request.cookies.get(SESSION_COOKIE)?.value);
 
@@ -660,7 +748,7 @@ export const config = { matcher: ["/study/:path*"] };
 分层校验策略：
 
 1. **proxy**：只看 Cookie 是否存在，快速拦截游客（不查库，避免边缘/额外延迟）
-2. **页面 RSC / Server Action**：`requireUser()` 查库校验会话有效性
+2. **页面 RSC / Route Handler**：`getCurrentUser()` 查库校验会话有效性
 3. 会话失效时统一跳 `/profile?auth=1&next=当前地址`
 
 ### 6.5 登录 / 注册流程
@@ -708,8 +796,8 @@ sequenceDiagram
 
 ### 6.7 限流（MVP）
 
-- 以 `IP + email` 为 key，内存滑动窗口：1 分钟最多 5 次登录/注册
-- 超限返回 `RATE_LIMITED`，提示「操作过于频繁，请稍后再试」
+- 以 `IP + email` 为 key，进程内滑动窗口（`lib/auth/rate-limit.ts`）：1 分钟最多 5 次登录/注册
+- 超限返回错误文案「操作过于频繁，请稍后再试」
 - 已知限制：Vercel Serverless 多实例下为单实例级限流，作为基础防护；后续可替换为 Upstash Redis
 
 ---
@@ -719,46 +807,50 @@ sequenceDiagram
 ### 7.1 首页数据
 
 ```ts
-// lib/books.ts
-export async function listBooks() {
-  return db
-    .select({
-      id: books.id, title: books.title, wordCount: books.wordCount,
-      coverUrl: books.coverUrl, bookld: books.bookld, tags: books.tags,
-    })
-    .from(books)
-    .orderBy(asc(books.createdAt));
-}
+// lib/data/books.ts
+export async function getBooks(): Promise<Book[]> {
+  const [rows, totals] = await Promise.all([
+    db.select().from(books).orderBy(asc(books.title)),
+    getWordTotals(), // words 表实际条数
+  ]);
 
-export async function getRecentStudy(userId: string) {
-  const [row] = await db
-    .select({
-      bookld: books.bookld,
-      title: books.title,
-      coverUrl: books.coverUrl,
-      wordCount: books.wordCount,
-      lastWordRank: learningProgress.lastWordRank,
-      learnedCount: learningProgress.learnedCount,
-      lastStudiedAt: learningProgress.lastStudiedAt,
-      completed: learningProgress.completed,
-    })
-    .from(learningProgress)
-    .innerJoin(books, eq(books.bookld, learningProgress.bookld))
-    .where(eq(learningProgress.userId, userId))
-    .orderBy(desc(learningProgress.lastStudiedAt))
-    .limit(1);
-
-  return row ?? null; // null 时首页不渲染「最近学习」
+  return rows.map((row) => ({
+    ...toBook(row),
+    wordCount: totals.get(row.bookld) ?? row.wordCount,
+  }));
 }
 ```
 
-首页 RSC：
+最近学习取自 `user_book_progress`，按 `last_studied_at` 倒序取第一条：
 
 ```ts
+// lib/data/progress.ts
+export async function getProgressList(userId: string): Promise<ProgressEntry[]> {
+  const [rows, totals] = await Promise.all([
+    db
+      .select({ progress: userBookProgress, book: books })
+      .from(userBookProgress)
+      .innerJoin(books, eq(userBookProgress.bookld, books.bookld))
+      .where(eq(userBookProgress.userId, userId))
+      .orderBy(desc(userBookProgress.lastStudiedAt)),
+    getWordTotals(),
+  ]);
+
+  return rows.map(({ progress, book }) => ({
+    progress: toProgress(progress),
+    book: { ...toBook(book), wordCount: totals.get(book.bookld) ?? book.wordCount },
+  }));
+}
+```
+
+首页数据在根布局 RSC 中读取并注入 `AppProvider`，首页/我的从 `useAppData()` 取 `books` 与 `progressList[0]`（最近学习）：
+
+```ts
+// app/layout.tsx（要点）
 const user = await getCurrentUser();
-const [books, recent] = await Promise.all([
-  listBooks(),
-  user ? getRecentStudy(user.id) : Promise.resolve(null),
+const [bookList, progress] = await Promise.all([
+  getBooks(),
+  user ? getProgressList(user.id) : Promise.resolve([]),
 ]);
 ```
 
@@ -766,110 +858,125 @@ const [books, recent] = await Promise.all([
 
 规则：
 
-- 无 `afterRank`：取 `wordRand desc nulls last` 排序后的**最小**一条（即第一词）
-- 有 `afterRank`：取 `wordRand > afterRank` 的最小一条
+- 无进度：`afterRank = 0`，取 `wordRand > 0` 的最小一条（从第一词开始）
+- 有进度：取 `wordRand > last_word_rank` 的最小一条
 - 没有结果 → 已到末尾
 
 ```ts
-export async function getNextWord(bookld: string, afterRank?: number) {
+// lib/data/words.ts
+export async function getNextWord(bookld: string, afterRank: number): Promise<Word | null> {
   const [row] = await db
-    .select({
-      id: words.id,
-      wordRand: words.wordRand,
-      headWord: words.headWord,
-      content: words.content,
-    })
-    .from(words)
-    .where(
-      and(
-        eq(words.bookld, bookld),
-        afterRank != null ? gt(words.wordRand, afterRank) : undefined,
-        isNotNull(words.wordRand)
-      )
-    )
-    .orderBy(asc(words.wordRand))
-    .limit(1);
-
-  return row ?? null;
-}
-```
-
-批量取词（学习窗口）：
-
-```ts
-export async function listWordsAfter(bookld: string, afterRank: number, limit: number) {
-  return db
-    .select({ id: words.id, wordRand: words.wordRand, headWord: words.headWord, content: words.content })
+    .select()
     .from(words)
     .where(and(eq(words.bookld, bookld), gt(words.wordRand, afterRank)))
     .orderBy(asc(words.wordRand))
-    .limit(Math.min(limit, 20));
+    .limit(1);
+
+  return row ? toWord(row) : null;
 }
 ```
 
-### 7.3 进度写入（幂等 upsert）
+批量取词（学习窗口），由 `GET /api/books/[bookld]/words` 调用：
 
 ```ts
-export async function saveProgress(userId: string, bookld: string, rank: number) {
+export async function getWordsAfter(bookld: string, afterRank: number, limit: number) {
+  const rows = await db
+    .select()
+    .from(words)
+    .where(and(eq(words.bookld, bookld), gt(words.wordRand, afterRank)))
+    .orderBy(asc(words.wordRand))
+    .limit(limit); // 上限 20 由 Route Handler 约束
+
+  return rows.map(toWord);
+}
+```
+
+### 7.3 进度写入（两张表）
+
+`POST /api/progress` 调用 `saveWordProgress`：先向 `user_word_progress` 去重插入，再统计 `learned_count`，最后 upsert `user_book_progress`。
+
+```ts
+// lib/data/progress.ts
+export async function saveWordProgress(input: {
+  userId: string;
+  bookld: string;
+  wordRank: number;
+}): Promise<SaveProgressResult> {
+  const { userId, bookld, wordRank } = input;
+
+  // 单词维度：唯一索引去重，重复学习不新增
   await db
-    .insert(learningProgress)
+    .insert(userWordProgress)
+    .values({ userId, bookld, wordRank })
+    .onConflictDoNothing();
+
+  // 已学单词数 = user_word_progress 实际条数
+  const [counted] = await db
+    .select({ value: count() })
+    .from(userWordProgress)
+    .where(and(eq(userWordProgress.userId, userId), eq(userWordProgress.bookld, bookld)));
+  const learnedCount = counted?.value ?? 0;
+
+  // 完成判定：实际查询是否还有更大的 wordRand
+  const nextWord = await getNextWord(bookld, wordRank);
+  const completed = !nextWord;
+  const total = await getWordCount(bookld);
+  const now = new Date();
+
+  // 单词书维度：upsert，last_word_rank 只前进
+  const [row] = await db
+    .insert(userBookProgress)
     .values({
-      userId, bookld, lastWordRank: rank, learnedCount: 1,
-      completed: false, lastStudiedAt: new Date(),
+      userId, bookld, lastWordRank: wordRank, learnedCount, completed,
+      lastStudiedAt: now, createdAt: now, updatedAt: now,
     })
     .onConflictDoUpdate({
-      target: [learningProgress.userId, learningProgress.bookld],
+      target: [userBookProgress.userId, userBookProgress.bookld],
       set: {
-        // 只允许前进
-        lastWordRank: sql`greatest(${learningProgress.lastWordRank}, ${rank})`,
-        // 首次到达该位置才 +1
-        learnedCount: sql`${learningProgress.learnedCount} +
-          case when ${rank} > ${learningProgress.lastWordRank} then 1 else 0 end`,
-        lastStudiedAt: new Date(),
-        updatedAt: new Date(),
+        lastWordRank: sql`greatest(${userBookProgress.lastWordRank}, ${wordRank})`,
+        learnedCount,
+        completed,
+        lastStudiedAt: now,
+        updatedAt: now,
       },
-    });
+    })
+    .returning();
+
+  return { progress: toProgress(row), nextWord, total };
 }
 ```
 
-完成判定（写入后检查是否还有更大的 `wordRand`）：
-
-```ts
-const next = await getNextWord(bookld, rank);
-if (!next) {
-  await db.update(learningProgress)
-    .set({ completed: true, updatedAt: new Date() })
-    .where(and(eq(learningProgress.userId, userId), eq(learningProgress.bookld, bookld)));
-}
-```
-
-> 进度写入采用「最后写入优先」。同一用户多端同时学习时可能出现进度回退到较小值，由 `greatest()` 保证不回退。
+> 进度写入采用「最后写入优先」。同一用户多端同时学习时可能出现进度回退到较小值，由 `greatest()` 保证不回退；`learned_count` 始终以词级表实际条数为准。
 
 ### 7.4 重置进度
 
+`DELETE /api/progress?bookld=` 调用 `resetBookProgress`，删除该用户该单词书的两张表记录：
+
 ```ts
-await db.update(learningProgress)
-  .set({ lastWordRank: 0, learnedCount: 0, completed: false, lastStudiedAt: new Date(), updatedAt: new Date() })
-  .where(and(eq(userId), eq(bookld)));
+export async function resetBookProgress(userId: string, bookld: string) {
+  await db
+    .delete(userWordProgress)
+    .where(and(eq(userWordProgress.userId, userId), eq(userWordProgress.bookld, bookld)));
+  await db
+    .delete(userBookProgress)
+    .where(and(eq(userBookProgress.userId, userId), eq(userBookProgress.bookld, bookld)));
+}
 ```
 
 ### 7.5 个人学习进度
 
 ```ts
-export async function listUserProgress(userId: string) {
+export async function getProgressList(userId: string) {
   return db
-    .select({
-      bookld: books.bookld, title: books.title, coverUrl: books.coverUrl,
-      wordCount: books.wordCount, learnedCount: learningProgress.learnedCount,
-      lastWordRank: learningProgress.lastWordRank, completed: learningProgress.completed,
-      lastStudiedAt: learningProgress.lastStudiedAt,
-    })
-    .from(learningProgress)
-    .innerJoin(books, eq(books.bookld, learningProgress.bookld))
-    .where(eq(learningProgress.userId, userId))
-    .orderBy(desc(learningProgress.lastStudiedAt));
+    .select({ progress: userBookProgress, book: books })
+    .from(userBookProgress)
+    .innerJoin(books, eq(userBookProgress.bookld, books.bookld))
+    .where(eq(userBookProgress.userId, userId))
+    .orderBy(desc(userBookProgress.lastStudiedAt));
 }
 ```
+
+`GET /api/progress` 返回该列表，并统一用 `getWordTotals()` 覆盖 `book.wordCount`。
 
 概览统计在应用层汇总：已学单词数、学习中单词书数（`!completed`）、已完成数。
 
@@ -878,55 +985,41 @@ export async function listUserProgress(userId: string) {
 `content` 列为 `json`，Drizzle 返回 `unknown`，且可能是字符串，需要防御式解析：
 
 ```ts
-// lib/words.ts
-export type WordDetail = {
+// lib/word-content.ts
+export type WordCardData = {
+  headWord: string;
+  phone: string | null;
+  tranCn: string;
+  sentence: { sContent: string; sCn?: string } | null;
+};
+
+export type WordDetailData = {
   headWord: string;
   usphone?: string;
   ukphone?: string;
+  phone?: string;
   trans: { pos?: string; tranCn: string; tranOther?: string }[];
   sentences: { sContent: string; sCn?: string }[];
   phrases: { pContent: string; pCn?: string }[];
   synos: { pos?: string; tran?: string; words: string[] }[];
   relWords: { pos?: string; items: { hwd: string; tran?: string }[] }[];
-  speech?: string;
-  ukspeech?: string;
-  usspeech?: string;
 };
 
-export function parseWordContent(raw: unknown, fallbackHeadWord: string | null): WordDetail | null {
-  const root = typeof raw === "string" ? safeJsonParse(raw) : raw;
-  const word = (root as any)?.word;
-  const c = word?.content;
-  if (!c || typeof c !== "object") return null;
+/** content 可能是字符串或对象；兼容 { word: { content: {...} } } 与直接存 content 的情况 */
+function rootContent(word: Word): Record<string, unknown> | null {
+  const parsed = typeof word.content === "string" ? safeParse(word.content) : word.content;
+  const root = record(parsed);
+  const inner = record(record(root?.word)?.content);
+  return inner ?? root;
+}
 
-  const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
-
-  return {
-    headWord: String(word?.wordHead ?? fallbackHeadWord ?? ""),
-    usphone: str(c.usphone),
-    ukphone: str(c.ukphone),
-    trans: arr<any>(c.trans).map((t) => ({
-      pos: str(t?.pos), tranCn: str(t?.tranCn) ?? "", tranOther: str(t?.tranOther),
-    })).filter((t) => t.tranCn),
-    sentences: arr<any>(c.sentence?.sentences).map((s) => ({
-      sContent: str(s?.sContent) ?? "", sCn: str(s?.sCn),
-    })).filter((s) => s.sContent),
-    phrases: arr<any>(c.phrase?.phrases).map((p) => ({
-      pContent: str(p?.pContent) ?? "", pCn: str(p?.pCn),
-    })).filter((p) => p.pContent),
-    synos: arr<any>(c.syno?.synos).map((s) => ({
-      pos: str(s?.pos), tran: str(s?.tran),
-      words: arr<any>(s?.hwds).map((h) => str(h?.w)).filter(Boolean) as string[],
-    })),
-    relWords: arr<any>(c.relWord?.rels).map((r) => ({
-      pos: str(r?.pos),
-      items: arr<any>(r?.words).map((w) => ({ hwd: str(w?.hwd) ?? "", tran: str(w?.tran) }))
-        .filter((w) => w.hwd),
-    })),
-    speech: str(c.speech), ukspeech: str(c.ukspeech), usspeech: str(c.usspeech),
-  };
+export function parseWordCard(word: Word): WordCardData {
+  const content = rootContent(word);
+  // 取 trans[0] / sentence.sentences[0]；音标优先 usphone → ukphone → phone
 }
 ```
+
+`parseWordDetail(word)` 使用同一 `rootContent`，按 `trans` / `sentence.sentences` / `phrase.phrases` / `syno.synos` / `relWord.rels` 逐段映射，空数组不渲染。
 
 渲染约定：
 
@@ -949,12 +1042,12 @@ export function parseWordContent(raw: unknown, fallbackHeadWord: string | null):
 
 | 路由 | 渲染 | 数据 |
 | --- | --- | --- |
-| `/` | RSC，动态（读取 Cookie） | 单词书列表 + 最近学习 |
-| `/profile` | RSC，动态 | 用户 + 进度列表 |
-| `/study/[bookld]` | RSC 壳 + Client 会话 | 进度、首批单词窗口 |
-| `/study/[bookld]/word/[wordRank]` | RSC，动态 | 单条单词详情 |
+| `/` | Client（`(tabs)` 布局），根 layout RSC 动态读取 Cookie | 单词书列表 + 最近学习（AppProvider 注入） |
+| `/profile` | Client | 用户 + 进度列表（AppProvider 注入） |
+| `/study/[bookld]` | Client `StudyView` | `/api/books/[bookld]/study` + `/api/books/[bookld]/words` |
+| `/study/[bookld]/word/[wordRank]` | Client `WordDetailView` | `/api/books/[bookld]/words/[wordRank]` |
 
-页面统一使用 `export const dynamic = "force-dynamic"`（或依赖 `cookies()` / `connection()` 自动动态），避免缓存用户态数据。
+根布局通过 `connection()` 强制动态读取用户态；Route Handler 统一设置 `export const dynamic = "force-dynamic"`，避免缓存用户数据。
 
 ### 8.2 组件状态
 
@@ -962,11 +1055,11 @@ export function parseWordContent(raw: unknown, fallbackHeadWord: string | null):
 | --- | --- | --- |
 | `TabBar` | Client | `usePathname()` 高亮 |
 | `AuthSheet` | Client | 打开态来自 `searchParams.auth`，模式 login/register 本地 state |
-| `StudySession` | Client | 当前词、单词窗口、进度、loading、完成态 |
-| `BookCard` / `RecentCard` | Server 可复用 | 无状态 |
-| `WordDetail` | Server | 无状态 |
+| `StudyView` | Client | 当前词、单词窗口、进度、loading、完成态 |
+| `BookCard` / `RecentCard` | Client | 无状态（数据来自 `useAppData()`） |
+| `WordDetailView` | Client | 单词详情 loading / error |
 
-不使用全局状态库；用户态由 RSC 传入，交互态局部管理。
+不引入第三方全局状态库；用户、单词书与进度由根布局 RSC 读取后经 `AppProvider`（`lib/app/store.tsx`）注入，交互态在组件内局部管理。
 
 ### 8.3 底部 Tab
 
@@ -1038,21 +1131,17 @@ export function TabBar() {
 ### 8.5 首页
 
 ```tsx
-// app/(tabs)/page.tsx（RSC 伪代码）
-export default async function HomePage() {
-  const user = await getCurrentUser();
-  const [bookList, recent] = await Promise.all([
-    listBooks(),
-    user ? getRecentStudy(user.id) : Promise.resolve(null),
-  ]);
+// app/(tabs)/page.tsx（Client 伪代码）
+export default function HomePage() {
+  const { user, books, recent } = useAppData();
 
   return (
     <main className="tab-content mx-auto max-w-[480px] px-4 pt-4">
-      {recent && <RecentCard data={recent} />}
+      {user && recent && <RecentCard entry={recent} />}
       <h2 className="mb-3 mt-6 text-base font-semibold">全部单词书</h2>
-      {bookList.length === 0 ? <EmptyBooks /> : (
+      {books.length === 0 ? <EmptyBooks /> : (
         <div className="grid grid-cols-2 gap-3">
-          {bookList.map((b) => <BookCard key={b.id} book={b} loggedIn={Boolean(user)} />)}
+          {books.map((b) => <BookCard key={b.id} book={b} loggedIn={Boolean(user)} />)}
         </div>
       )}
     </main>
@@ -1076,56 +1165,61 @@ export default async function HomePage() {
 
 ```mermaid
 sequenceDiagram
-  participant RSC as StudyPage(RSC)
-  participant SC as StudySession(Client)
-  participant A as Server Actions
+  participant SC as StudyView(Client)
+  participant API as Route Handlers
   participant D as DB
 
-  RSC->>D: 读进度 + 首批单词(8)
-  RSC-->>SC: initialWords, progress, total
+  SC->>API: GET /api/books/{bookld}/study
+  API->>D: 读 user_book_progress + 下一个单词
+  API-->>SC: { progress, total, word, position, completed }
+  SC->>API: GET /api/books/{bookld}/words?after=...&limit=7
+  API-->>SC: words（与服务端首词凑满 8 条窗口）
   SC->>SC: 展示当前词
   loop 点击「下一个」
     SC->>SC: 取窗口内下一词（即时）
-    SC->>A: saveProgress(bookld, currentRank)
-    A->>D: upsert 进度 + 完成判定
-    A-->>SC: { learnedCount, completed }
-    SC->>A: 窗口不足 3 时 loadWordBatch
+    SC->>API: POST /api/progress { bookld, wordRank }
+    API->>D: insert user_word_progress + upsert user_book_progress
+    API-->>SC: { progress, nextWord, total }
+    SC->>API: 剩余 ≤ 3 时预取下一批 words
   end
   SC->>SC: 窗口耗尽且无更多 → 完成态
 ```
 
-Server Actions：
+Route Handlers 要点：
 
 ```ts
-// app/actions/study.ts
-"use server";
-
-export async function saveProgressAction(bookld: string, rank: number): Promise<
-  { ok: true; learnedCount: number; completed: boolean } | { ok: false; code: string; message: string }
-> {
+// app/api/progress/route.ts
+export async function POST(request: Request) {
   const user = await getCurrentUser();
-  if (!user) return { ok: false, code: "AUTH_REQUIRED", message: "请先登录" };
-  // 校验 bookld 存在、rank 合法
-  // saveProgress + 完成判定
-}
+  if (!user) return NextResponse.json({ error: "未登录" }, { status: 401 });
 
-export async function loadWordBatchAction(bookld: string, afterRank: number, limit = 8) {
-  const user = await getCurrentUser();
-  if (!user) return { ok: false as const, code: "AUTH_REQUIRED" };
-  const rows = await listWordsAfter(bookld, afterRank, limit);
-  return { ok: true as const, words: rows.map(toWordCard) };
+  const body = await request.json().catch(() => null);
+  if (!body?.bookld || typeof body.wordRank !== "number") {
+    return NextResponse.json({ error: "参数不完整" }, { status: 400 });
+  }
+
+  // 写入 user_word_progress（去重）+ upsert user_book_progress
+  return NextResponse.json(await saveWordProgress({ userId: user.id, ...body }));
 }
+```
+
+```ts
+// app/api/books/[bookld]/words/route.ts（要点）
+const after = Number(searchParams.get("after") ?? 0);
+const limit = Math.min(Math.max(Math.trunc(limitValue), 1), 20); // 上限 20
+return NextResponse.json({ words: await getWordsAfter(bookld, after, limit) });
 ```
 
 客户端切换策略：
 
-1. 初始窗口 8 条，点击「下一个」立即从本地数组取下一个并渲染（无网络等待）
-2. 同时调用 `saveProgressAction`，失败时 Toast 提示并标记待重试（下次点击再试）
-3. 剩余 ≤ 3 条时预取下一批（`loadWordBatchAction`）
-4. 窗口耗尽且服务端无更多 → 展示完成态
-5. 首词位置：
-   - 有进度：`getNextWord(bookld, progress.lastWordRank)`
-   - 无进度：`getNextWord(bookld)`
+1. 初始窗口 `WINDOW_SIZE = 8`：服务端返回首个待学单词，再请求 `words?after=<rank>&limit=7` 补齐
+2. 点击「下一个」立即从本地数组取下一个并渲染（无网络等待）
+3. 同时异步 `POST /api/progress`；失败仅 Toast「进度保存失败，请检查网络后重试」，不阻断切换，下次点击重试
+4. 窗口剩余 ≤ 3 条时调用 `GET /api/books/[bookld]/words` 预取下一批
+5. 窗口耗尽且 `hasMore = false` → 展示完成态
+6. 首词位置由 `/api/books/[bookld]/study` 的 `getStudyState()` 决定：
+   - 有进度：`wordRand > last_word_rank` 的最小一条
+   - 无进度：从 `wordRand` 最小的单词开始
    - 无结果：完成态
 
 ### 8.7 单词卡片
@@ -1150,15 +1244,14 @@ export async function loadWordBatchAction(bookld: string, afterRank: number, lim
 
 ### 8.8 详情页
 
-RSC 直接查询：
+详情由 `WordDetailView`（Client）调用 `GET /api/books/[bookld]/words/[wordRank]` 获取，服务端用 `getWordByRank()` 查询并解析 `content`：
 
 ```ts
-const [row] = await db
-  .select({ wordRand: words.wordRand, headWord: words.headWord, content: words.content })
-  .from(words)
-  .where(and(eq(words.bookld, bookld), eq(words.wordRand, Number(wordRank))))
-  .limit(1);
-if (!row) notFound();
+const response = await fetch(`/api/books/${bookld}/words/${wordRank}`, {
+  cache: "no-store",
+});
+if (!response.ok) throw new Error("单词不存在");
+const data = (await response.json()) as { word: Word };
 ```
 
 分区渲染顺序：单词/音标 → 释义 → 例句 → 短语 → 同近义词 → 同根词。返回按钮使用 `router.back()`（Client 小组件），无历史时回学习页。
@@ -1177,39 +1270,54 @@ if (!row) notFound();
 
 ---
 
-## 9. 接口契约（Server Actions）
+## 9. 接口契约（Route Handlers）
 
-统一返回：
+学习与进度统一使用 Route Handlers，成功时直接返回 JSON 资源对象，失败返回 `{ error }` + HTTP 状态码。
 
-```ts
-type ActionResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; code: ActionErrorCode; message: string };
-```
+| 方法 | 路径 | 入参 | 出参 | 鉴权 |
+| --- | --- | --- | --- | --- |
+| GET | `/api/books/[bookld]/study` | — | `{ progress, total, word, position, completed }` | 是 |
+| GET | `/api/books/[bookld]/words` | `after`（rank）、`limit`（默认 8，上限 20） | `{ words: Word[] }` | 是 |
+| GET | `/api/books/[bookld]/words/[wordRank]` | — | `{ word: Word }` | 是 |
+| GET | `/api/progress` | — | `{ progress: ProgressEntry[] }` | 是 |
+| POST | `/api/progress` | `{ bookld, wordRank }` | `{ progress, nextWord, total }` | 是 |
+| DELETE | `/api/progress?bookld=<bookld>` | `bookld` | `{ ok: true }` | 是 |
+
+认证仍为 Server Actions（`app/actions/auth.ts`）：
 
 | Action | 入参 | 出参 | 鉴权 |
 | --- | --- | --- | --- |
-| `signUpAction` | `{ email, password, confirmPassword }` | `{ userId }` | 否 |
-| `signInAction` | `{ email, password }` | `{ userId }` | 否 |
-| `signOutAction` | — | `{ ok: true }` | 是 |
-| `saveProgressAction` | `{ bookld, wordRank }` | `{ learnedCount, completed }` | 是 |
-| `loadWordBatchAction` | `{ bookld, afterRank, limit }` | `{ words: WordCardDTO[] }` | 是 |
-| `resetProgressAction` | `{ bookld }` | `{ ok: true }` | 是 |
+| `signUpAction` | `{ email, password }` | `{ ok: true } \| { ok: false, error }` | 否 |
+| `signInAction` | `{ email, password }` | `{ ok: true } \| { ok: false, error }` | 否 |
+| `signOutAction` | — | `void` | 是 |
 
-错误码：
+`POST /api/progress` 请求示例：
 
-| code | 场景 | 前端处理 |
+```ts
+const response = await fetch("/api/progress", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ bookld, wordRank }),
+});
+
+const result = (await response.json()) as {
+  progress: BookProgress;
+  nextWord: Word | null;
+  total: number;
+};
+```
+
+错误状态：
+
+| HTTP / 场景 | 场景 | 前端处理 |
 | --- | --- | --- |
-| `INVALID_INPUT` | 参数不合法 | 字段提示 |
-| `INVALID_CREDENTIALS` | 邮箱或密码错误 | 弹窗内提示 |
-| `EMAIL_TAKEN` | 邮箱已注册 | 弹窗内提示 |
-| `RATE_LIMITED` | 频率超限 | Toast |
-| `AUTH_REQUIRED` | 未登录/会话过期 | 跳登录弹窗 |
-| `BOOK_NOT_FOUND` | 单词书不存在 | 空状态 |
-| `WORD_NOT_FOUND` | 单词不存在 | 详情页 404 |
-| `INTERNAL` | 未知错误 | Toast + 重试 |
+| 400 | 参数不合法 / 缺少 `bookld` | 字段提示或 Toast |
+| 401 | 未登录 / 会话过期 | 跳登录弹窗（携带 `next`） |
+| 404 | 单词书或单词不存在 | 空状态 / 404 |
+| 认证失败文案 | 邮箱或密码错误、邮箱已注册、频率超限 | 弹窗内提示 |
+| 500 | 未知错误 | Toast + 重试 |
 
-服务端校验先行：所有 Action 不信任前端传入的 `userId`，一律从会话读取。
+服务端校验先行：所有接口不信任前端传入的 `userId`，一律从会话读取；`POST /api/progress` 写入两张进度表并返回最新进度。
 
 ---
 
@@ -1222,7 +1330,7 @@ type ActionResult<T> =
 | 会话固定 | 登录成功重新签发 Token |
 | 暴力破解 | IP + 邮箱维度限流；统一错误文案 |
 | 账号枚举 | 登录失败不区分账号是否存在 |
-| CSRF | 全部写操作为 Server Actions（同源校验），不使用 GET 变更数据 |
+| CSRF | 写操作走同源 Route Handler + 会话 Cookie 校验，不用 GET 变更数据 |
 | 开放重定向 | `next` 仅允许站内路径（`/` 开头且非 `//`） |
 | XSS | 单词内容纯文本渲染，禁止 `dangerouslySetInnerHTML` |
 | 越权 | 学习/进度接口从会话取 `userId`；校验 `bookld` 是否存在 |
@@ -1241,7 +1349,7 @@ type ActionResult<T> =
 | 封面图 | `loading="lazy"` + 固定宽高比，避免 CLS |
 | 单词书列表 | 数据量小；可加 5 分钟进程内缓存，管理端更新允许短暂延迟 |
 | 用户态数据 | 不缓存（`cookies()` / `connection()` 动态渲染） |
-| 查询索引 | `words(bookld, wordRand)`、`learning_progress(user_id, last_studied_at)` |
+| 查询索引 | `words(bookld, wordRand)`、`user_book_progress(user_id, last_studied_at)`、`user_word_progress(user_id, bookld)` |
 | 打包体积 | 按需引入 lucide 图标；详情页组件不进入首页 bundle |
 
 目标：4G 下首屏 LCP < 2.5s，单词切换感知延迟 < 200ms。
@@ -1251,8 +1359,8 @@ type ActionResult<T> =
 ## 12. 异常与可观测性
 
 - 页面级：`app/error.tsx`（重试）、`app/not-found.tsx`
-- Action 级：捕获异常 → 返回 `INTERNAL`，服务端 `console.error` 记录 `action`、`bookld`、`userId`（不含密码/Token）
-- Toast：统一通过 shadcn `Sonner` 展示
+- 接口级：Route Handler 捕获异常 → 返回 500 与 `{ error }`，服务端 `console.error` 记录路由、`bookld`、`userId`（不含密码/Token）
+- Toast：项目自研 `lib/app/toast.tsx`（`ToastProvider` + `useToast`），`ToastProvider` 挂在根布局；成功登录/退出登录、进度保存失败等场景使用
 - 关键埋点（可选）：登录成功、开始学习、完成学习、退出登录
 
 日志禁止输出：密码、Cookie Token、完整 `DATABASE_URL`。
@@ -1263,9 +1371,9 @@ type ActionResult<T> =
 
 | 层级 | 内容 | 工具 |
 | --- | --- | --- |
-| 单元测试 | 邮箱/密码校验、`parseWordContent`、`safeInternalPath`、进度增减逻辑 | Vitest |
-| 数据测试 | `saveProgress` upsert、完成判定、批量取词 | Vitest + 测试库 |
-| 组件测试 | AuthSheet 表单校验与切换、StudySession 切换与完成态 | Testing Library |
+| 单元测试 | 邮箱/密码校验、`parseWordCard` / `parseWordDetail`、`safeInternalPath`、进度去重计数 | Vitest |
+| 数据测试 | `saveWordProgress` 双表写入、完成判定、`getWordsAfter` 取词窗口 | Vitest + 测试库 |
+| 组件测试 | AuthSheet 表单校验与切换、StudyView 切换与完成态 | Testing Library |
 | E2E | 游客浏览 → 登录 → 学习 → 刷新恢复进度 → 退出 | Playwright |
 
 关键 E2E 用例：
@@ -1325,12 +1433,12 @@ npm run dev
 
 1. 初始化 `nextjs-starter`（Next 16 + TS + Tailwind 4 + shadcn）
 2. 配置 Drizzle / Supabase 连接与 `db/schema.ts`
-3. 生成并执行迁移（`app_users`、`app_sessions`、`learning_progress`、`words` 索引）
-4. 实现 `password.ts` / `session.ts` / `auth.ts` 与认证 Actions
-5. 实现 `proxy.ts` 路由保护
+3. 生成并执行迁移（`app_users`、`app_sessions`、`user_book_progress`、`user_word_progress` 与 `words(bookld, wordRand)` 索引）
+4. 实现 `lib/auth/password.ts`、`session.ts`、`users.ts`、`rate-limit.ts` 与认证 Server Actions
+5. 实现 `proxy.ts` 路由保护（默认导出 `proxy`，仅检查会话 Cookie）
 6. 实现 Tab 布局、首页、我的
 7. 实现 AuthSheet 登录/注册弹窗
-8. 实现学习页（批量取词 + 进度写入 + 完成态）
+8. 实现学习页（本地窗口 + Route Handler 取词 + 异步进度写入 + 完成态）
 9. 实现单词详情页与发音
 10. 补齐错误态、骨架屏、Toast
 11. 单元测试 + E2E，最后联调部署
