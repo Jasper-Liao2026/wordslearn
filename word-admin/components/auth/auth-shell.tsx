@@ -1,4 +1,5 @@
 import { BarChart3, BookOpenText, ShieldCheck } from "lucide-react";
+import Image from "next/image";
 import type { ReactNode } from "react";
 
 import { Brand } from "@/components/brand";
@@ -34,9 +35,18 @@ export function AuthShell({
     <div className="grid min-h-svh lg:grid-cols-[1.05fr_1fr]">
       <aside className="relative hidden overflow-hidden bg-zinc-950 p-12 text-white lg:flex lg:flex-col lg:justify-between">
         <div className="pointer-events-none absolute inset-0">
-          <div className="absolute -top-32 -left-24 size-96 rounded-full bg-emerald-500/20 blur-3xl" />
-          <div className="absolute -right-24 bottom-0 size-96 rounded-full bg-sky-500/10 blur-3xl" />
-          <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.04)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.04)_1px,transparent_1px)] bg-[size:48px_48px]" />
+          <Image
+            src="/auth-compass.png"
+            alt=""
+            fill
+            loading="eager"
+            fetchPriority="high"
+            sizes="(min-width: 1024px) 52.5vw, 100vw"
+            className="object-cover"
+          />
+          <div className="absolute inset-0 bg-zinc-950/35" />
+          <div className="absolute inset-0 bg-gradient-to-r from-zinc-950/90 via-zinc-950/35 to-transparent" />
+          <div className="absolute inset-0 bg-gradient-to-b from-zinc-950/60 via-transparent to-zinc-950/65" />
         </div>
 
         <Brand muted className="relative" />
